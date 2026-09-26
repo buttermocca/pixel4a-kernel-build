@@ -1,4 +1,4 @@
-name: Build Pixel 4a Kernel (KSU Next + SUSFS + BBR)
+name: Build Pixel 4a Kernel (KernelSU + SUSFS + BBR)
 
 on:
   workflow_dispatch:
@@ -34,42 +34,45 @@ jobs:
           repo init -u https://android.googlesource.com/kernel/manifest -b android-msm-sunfish-4.14-android13 --depth=1
           repo sync -c -j$(nproc) --no-tags --no-clone-bundle
 
-      - name: KernelSU Next 및 SUSFS 패치 적용
+      - name: KernelSU 및 SUSFS 패치 적용 (100% 호환 구조)
         run: |
           export GIT_TERMINAL_PROMPT=0
           cd kernel_workspace/private/msm-google
 
-          # 1. KernelSU-Next 드라이버 배치
+          # 1. 공식 KernelSU 소스 클론 (SUSFS 패치와 100% 일치)
           rm -rf drivers/kernelsu
-          mkdir -p drivers/kernelsu
-          git clone https://github.com/rifsxd/KernelSU-Next /tmp/KernelSU-Next
-          cp -r /tmp/KernelSU-Next/kernel/* drivers/kernelsu/
+          git clone https://github.com/tiann/KernelSU.git drivers/kernelsu
 
           grep -q "kernelsu" drivers/Kconfig || echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
           grep -q "kernelsu" drivers/Makefile || echo 'obj-y += kernelsu/' >> drivers/Makefile
 
-          # 2. SUSFS 소스 복사 및 Makefile 연결 (링크 에러 원천 차단)
-          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b kernel-4.14 /tmp/susfs || true
+          # 2. SUSFS 4.14 전용 소스 클론
+          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b kernel-4.14 /tmp/susfs
 
-          if [ -d "/tmp/susfs/kernel_patches" ]; then
-            cp -r /tmp/susfs/kernel_patches/fs/* fs/ || true
-            cp -r /tmp/susfs/kernel_patches/include/linux/* include/linux/ || true
-            
-            # fs/Makefile에 susfs 빌드 객체 강제 주입
-            grep -q "susfs.o" fs/Makefile || echo 'obj-$(CONFIG_KSU_SUSFS) += susfs.o' >> fs/Makefile
-            grep -q "susfs.o" fs/Makefile || echo 'obj-y += susfs.o' >> fs/Makefile
-
-            patch -p1 --forward --fuzz=3 < /tmp/susfs/kernel_patches/50_add_susfs_in_kernel-4.14.patch || true
+          # 3. KernelSU 전용 SUSFS 패치 적용 (10_patch)
+          if [ -f "/tmp/susfs/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch" ]; then
+            cd drivers/kernelsu
+            patch -p1 < /tmp/susfs/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch
+            cd ../..
           fi
 
-      - name: Defconfig 설정 및 검사 무력화
+          # 4. 커널 소스 전용 SUSFS 패치 적용 (50_patch 및 파일 복사)
+          cp -r /tmp/susfs/kernel_patches/fs/* fs/
+          cp -r /tmp/susfs/kernel_patches/include/linux/* include/linux/
+          
+          # fs/Makefile에 susfs.o 빌드 명시
+          grep -q "susfs.o" fs/Makefile || echo 'obj-$(CONFIG_KSU_SUSFS) += susfs.o' >> fs/Makefile
+
+          patch -p1 < /tmp/susfs/kernel_patches/50_add_susfs_in_kernel-4.14.patch
+
+      - name: Defconfig 설정 및 구글 검사 로직 완전 무력화
         run: |
           cd kernel_workspace/private/msm-google
 
-          # check_defconfig 검사 로직 완전 제거
+          # check_defconfig 검사 로직 물리적 제거
           find . -name "build.config*" -exec sed -i 's/check_defconfig//g' {} +
           find . -name "build.config*" -exec sh -c 'echo "POST_DEFCONFIG_CMDS=\"\"" >> "$1"' _ {} \;
-          find ../build/ -type f -exec sed -i 's/check_defconfig//g' {} + 2>/dev/null || true
+          find ../build/ -type f -exec sed -i 's/check_defconfig//g' {} + 2>/devnull || true
 
           # sunfish_defconfig 옵션 주입
           DEFCONFIG=$(find arch/arm64/configs -name "*sunfish_defconfig" | head -n 1)
@@ -122,5 +125,5 @@ jobs:
       - name: 완제품 파일 업로드 (Artifacts)
         uses: actions/upload-artifact@v4
         with:
-          name: Sunfish-KernelSU-Next-SUSFS
+          name: Sunfish-KernelSU-SUSFS
           path: AnyKernel3/Sunfish-Custom-Kernel.zip
