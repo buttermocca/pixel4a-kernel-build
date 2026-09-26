@@ -1,7 +1,7 @@
 name: Build Pixel 4a Kernel (KSU Next + SUSFS + BBR)
 
 on:
-  workflow_dispatch: # 버튼을 눌러 수동 실행
+  workflow_dispatch:
 
 jobs:
   build:
@@ -20,7 +20,7 @@ jobs:
       - name: 필수 빌드 도구 설치
         run: |
           sudo apt-get update
-          sudo apt-get install -y bc build-essential libncurses5-dev libssl-dev bison flex libelf-dev libsqlite3-dev git curl zip unzip python3
+          sudo apt-get install -y bc build-essential libncurses5-dev libssl-dev bison flex libelf-dev libsqlite3-dev git curl zip unzip python3 python-is-python3
 
       - name: Repo 도구 설치 및 커널 소스 다운로드
         run: |
@@ -34,28 +34,26 @@ jobs:
           repo init -u https://android.googlesource.com/kernel/manifest -b android-msm-sunfish-4.14-android13 --depth=1
           repo sync -c -j$(nproc) --no-tags --no-clone-bundle
 
-      - name: KernelSU Next 적용
+      - name: KernelSU Next 및 SUSFS 패치 적용
         run: |
           cd kernel_workspace/kernel/msm
+
+          # 1. KernelSU-Next 설치
           curl -LSs "https://raw.githubusercontent.com/rifscall/KernelSU-Next/next/kernel/setup.sh" | bash -s next
 
-      - name: SUSFS 패치 적용
-        run: |
-          cd kernel_workspace/kernel/msm
-          
-          # SUSFS 패치 파일 다운로드
+          # 2. SUSFS 소스 클론 및 패치 적용
           git clone https://gitlab.com/simonpunk/susfs4ksu.git -b kernel-4.14 /tmp/susfs
-          
+
           # KSU 패치 적용
           cp /tmp/susfs/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch drivers/kernelsu/ || true
           cd drivers/kernelsu
-          patch -p1 < 10_enable_susfs_for_ksu.patch || true
+          patch -p1 --forward < 10_enable_susfs_for_ksu.patch || true
           cd ../..
 
-          # 커널 소스 패치 적용
-          cp /tmp/susfs/kernel_patches/fs/* fs/
-          cp /tmp/susfs/kernel_patches/include/linux/* include/linux/
-          patch -p1 < /tmp/susfs/kernel_patches/50_add_susfs_in_kernel-4.14.patch
+          # 커널 소스 패치 적용 (충돌 방지 처리)
+          cp /tmp/susfs/kernel_patches/fs/* fs/ || true
+          cp /tmp/susfs/kernel_patches/include/linux/* include/linux/ || true
+          patch -p1 --forward < /tmp/susfs/kernel_patches/50_add_susfs_in_kernel-4.14.patch || true
 
       - name: Defconfig 설정 (KSU, SUSFS, BBR 활성화)
         run: |
@@ -84,7 +82,7 @@ jobs:
       - name: 커널 빌드
         run: |
           cd kernel_workspace
-          ./build/build.sh
+          LTO=thin BUILD_CONFIG=private/msm-google/build.config.sunfish ./build/build.sh
 
       - name: AnyKernel3 패키징
         run: |
@@ -92,7 +90,7 @@ jobs:
           cd AnyKernel3
           sed -i 's/device.name1=/device.name1=sunfish/g' anykernel.sh
           
-          # 빌드 완료된 이미지 파일 복사
+          # 빌드 완료된 이미지 복사
           cp ../kernel_workspace/out/android-msm-pixel-4.14/dist/Image.lz4-dtb .
           
           zip -r9 Sunfish-Custom-Kernel.zip * -x .git README.md
