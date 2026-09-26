@@ -34,54 +34,33 @@ jobs:
           repo init -u https://android.googlesource.com/kernel/manifest -b android-msm-sunfish-4.14-android13 --depth=1
           repo sync -c -j$(nproc) --no-tags --no-clone-bundle
 
-      - name: KernelSU Next 및 SUSFS 패치 적용
+      - name: KernelSU Next 공식 설치 및 커널 SUSFS 패치 적용
         run: |
           export GIT_TERMINAL_PROMPT=0
           cd kernel_workspace/private/msm-google
 
-          # 1. KernelSU-Next 소스 복사 (Kconfig 경로 에러 완벽 해결)
-          rm -rf drivers/kernelsu
-          mkdir -p drivers/kernelsu
-          git clone https://github.com/rifsxd/KernelSU-Next /tmp/KernelSU-Next
-          cp -r /tmp/KernelSU-Next/kernel/. drivers/kernelsu/
+          # 1. KernelSU-Next 공식 setup.sh 실행 (헤더 경로 및 Git 버전 완벽 유지)
+          curl -LSs "https://raw.githubusercontent.com/rifsxd/KernelSU-Next/next/kernel/setup.sh" | bash -s next
 
-          # Kconfig 존재 여부 자동 검증
-          if [ ! -f "drivers/kernelsu/Kconfig" ]; then
-            echo "ERROR: drivers/kernelsu/Kconfig 파일이 존재하지 않습니다."
-            exit 1
-          fi
-
-          # Kconfig 및 Makefile 설정 연결
-          grep -q "kernelsu" drivers/Kconfig || echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
-          grep -q "kernelsu" drivers/Makefile || echo 'obj-y += kernelsu/' >> drivers/Makefile
-
-          # 2. SUSFS 소스 클론 및 패치 적용
+          # 2. 커널 전용 SUSFS 소스 패치 (KernelSU-Next 자체 패치는 중복 적용 금지)
           git clone https://gitlab.com/simonpunk/susfs4ksu.git -b kernel-4.14 /tmp/susfs || true
 
-          # KSU 패치 적용
-          if [ -f "/tmp/susfs/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch" ]; then
-            cd drivers/kernelsu
-            patch -p1 --forward < /tmp/susfs/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch || true
-            cd ../..
-          fi
-
-          # 커널 소스 패치 적용
           if [ -d "/tmp/susfs/kernel_patches" ]; then
             cp -r /tmp/susfs/kernel_patches/fs/* fs/ || true
             cp -r /tmp/susfs/kernel_patches/include/linux/* include/linux/ || true
             patch -p1 --forward < /tmp/susfs/kernel_patches/50_add_susfs_in_kernel-4.14.patch || true
           fi
 
-      - name: Defconfig 설정 및 검사 로직 완전 무력화
+      - name: Defconfig 설정 및 검사 무력화
         run: |
           cd kernel_workspace/private/msm-google
 
-          # 1. 모든 build.config 관련 파일에서 check_defconfig 제거 및 POST_DEFCONFIG_CMDS 강제 빈값 처리
+          # 모든 build.config 파일에서 check_defconfig 강제 제거
           find . -name "build.config*" -exec sed -i 's/check_defconfig//g' {} +
           find . -name "build.config*" -exec sh -c 'echo "POST_DEFCONFIG_CMDS=\"\"" >> "$1"' _ {} \;
           find ../build/ -type f -exec sed -i 's/check_defconfig//g' {} + 2>/dev/null || true
 
-          # 2. sunfish defconfig 파일 찾기 및 KSU/SUSFS/BBR 설정값 추가
+          # sunfish defconfig에 KSU / SUSFS / BBR 옵션 주입
           DEFCONFIG=$(find arch/arm64/configs -name "*sunfish_defconfig" | head -n 1)
 
           if [ -n "$DEFCONFIG" ]; then
