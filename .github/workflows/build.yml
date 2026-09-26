@@ -36,7 +36,8 @@ jobs:
 
       - name: KernelSU Next 및 SUSFS 패치 적용
         run: |
-          cd kernel_workspace/kernel/msm
+          # pixel 4a 커널 경로인 private/msm-google 로 이동
+          cd kernel_workspace/private/msm-google
 
           # 1. KernelSU-Next 설치
           curl -LSs "https://raw.githubusercontent.com/rifscall/KernelSU-Next/next/kernel/setup.sh" | bash -s next
@@ -50,14 +51,14 @@ jobs:
           patch -p1 --forward < 10_enable_susfs_for_ksu.patch || true
           cd ../..
 
-          # 커널 소스 패치 적용 (충돌 방지 처리)
+          # 커널 소스 패치 적용
           cp /tmp/susfs/kernel_patches/fs/* fs/ || true
           cp /tmp/susfs/kernel_patches/include/linux/* include/linux/ || true
           patch -p1 --forward < /tmp/susfs/kernel_patches/50_add_susfs_in_kernel-4.14.patch || true
 
       - name: Defconfig 설정 (KSU, SUSFS, BBR 활성화)
         run: |
-          cd kernel_workspace/kernel/msm
+          cd kernel_workspace/private/msm-google
           DEFCONFIG="arch/arm64/configs/sunfish_defconfig"
 
           cat <<EOT >> $DEFCONFIG
@@ -90,8 +91,8 @@ jobs:
           cd AnyKernel3
           sed -i 's/device.name1=/device.name1=sunfish/g' anykernel.sh
           
-          # 빌드 완료된 이미지 복사
-          cp ../kernel_workspace/out/android-msm-pixel-4.14/dist/Image.lz4-dtb .
+          # 빌드 완료된 이미지 자동 탐색 후 복사
+          find ../kernel_workspace/out/ -name "Image.lz4-dtb" -exec cp {} . \; || cp ../kernel_workspace/out/android-msm-pixel-4.14/dist/Image* .
           
           zip -r9 Sunfish-Custom-Kernel.zip * -x .git README.md
 
