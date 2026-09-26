@@ -39,8 +39,19 @@ jobs:
           export GIT_TERMINAL_PROMPT=0
           cd kernel_workspace/private/msm-google
 
-          # 1. KernelSU-Next 클론 및 드라이버 연결
-          git clone https://github.com/rifsxd/KernelSU-Next drivers/kernelsu
+          # 1. KernelSU-Next 소스 복사 (Kconfig 경로 에러 완벽 해결)
+          rm -rf drivers/kernelsu
+          mkdir -p drivers/kernelsu
+          git clone https://github.com/rifsxd/KernelSU-Next /tmp/KernelSU-Next
+          cp -r /tmp/KernelSU-Next/kernel/. drivers/kernelsu/
+
+          # Kconfig 존재 여부 자동 검증
+          if [ ! -f "drivers/kernelsu/Kconfig" ]; then
+            echo "ERROR: drivers/kernelsu/Kconfig 파일이 존재하지 않습니다."
+            exit 1
+          fi
+
+          # Kconfig 및 Makefile 설정 연결
           grep -q "kernelsu" drivers/Kconfig || echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
           grep -q "kernelsu" drivers/Makefile || echo 'obj-y += kernelsu/' >> drivers/Makefile
 
@@ -48,10 +59,9 @@ jobs:
           git clone https://gitlab.com/simonpunk/susfs4ksu.git -b kernel-4.14 /tmp/susfs || true
 
           # KSU 패치 적용
-          if [ -d "/tmp/susfs/kernel_patches/KernelSU" ]; then
-            cp /tmp/susfs/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch drivers/kernelsu/ || true
+          if [ -f "/tmp/susfs/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch" ]; then
             cd drivers/kernelsu
-            patch -p1 --forward < 10_enable_susfs_for_ksu.patch || true
+            patch -p1 --forward < /tmp/susfs/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch || true
             cd ../..
           fi
 
@@ -62,7 +72,7 @@ jobs:
             patch -p1 --forward < /tmp/susfs/kernel_patches/50_add_susfs_in_kernel-4.14.patch || true
           fi
 
-      - name: Defconfig 설정 및 검사 로직 완전 무력화 (에러 해결 핵심)
+      - name: Defconfig 설정 및 검사 로직 완전 무력화
         run: |
           cd kernel_workspace/private/msm-google
 
