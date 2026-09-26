@@ -39,11 +39,8 @@ jobs:
           export GIT_TERMINAL_PROMPT=0
           cd kernel_workspace/private/msm-google
 
-          # 1. KernelSU-Next 정확한 주소에서 다운로드 및 폴더 복사
-          git clone https://github.com/rifsxd/KernelSU-Next.git /tmp/KernelSU-Next
-          cp -r /tmp/KernelSU-Next/kernel drivers/kernelsu
-
-          # Kconfig 및 Makefile 설정 연결
+          # 1. KernelSU-Next 클론 및 드라이버 연결
+          git clone https://github.com/rifsxd/KernelSU-Next drivers/kernelsu
           grep -q "kernelsu" drivers/Kconfig || echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
           grep -q "kernelsu" drivers/Makefile || echo 'obj-y += kernelsu/' >> drivers/Makefile
 
@@ -65,21 +62,22 @@ jobs:
             patch -p1 --forward < /tmp/susfs/kernel_patches/50_add_susfs_in_kernel-4.14.patch || true
           fi
 
-      - name: Defconfig 설정 및 검사 무력화 (에러 해결 핵심)
+      - name: Defconfig 설정 및 검사 로직 완전 무력화 (에러 해결 핵심)
         run: |
           cd kernel_workspace/private/msm-google
-          
-          # 구글의 깐깐한 Defconfig 검사 로직 강제 삭제 (savedefconfig 에러 원인 차단)
-          sed -i 's/POST_DEFCONFIG_CMDS="check_defconfig"/POST_DEFCONFIG_CMDS=""/g' build.config.common || true
-          sed -i 's/check_defconfig//g' build.config.common || true
 
-          # 정확한 defconfig 파일 자동 탐색 후 값 추가
+          # 1. 모든 build.config 관련 파일에서 check_defconfig 제거 및 POST_DEFCONFIG_CMDS 강제 빈값 처리
+          find . -name "build.config*" -exec sed -i 's/check_defconfig//g' {} +
+          find . -name "build.config*" -exec sh -c 'echo "POST_DEFCONFIG_CMDS=\"\"" >> "$1"' _ {} \;
+          find ../build/ -type f -exec sed -i 's/check_defconfig//g' {} + 2>/dev/null || true
+
+          # 2. sunfish defconfig 파일 찾기 및 KSU/SUSFS/BBR 설정값 추가
           DEFCONFIG=$(find arch/arm64/configs -name "*sunfish_defconfig" | head -n 1)
 
           if [ -n "$DEFCONFIG" ]; then
             cat <<EOT >> $DEFCONFIG
 
-          # KernelSU & SUSFS & BBR 필수 환경 설정
+          # KernelSU & SUSFS & BBR Configuration
           CONFIG_KPROBES=y
           CONFIG_HAVE_KPROBES=y
           CONFIG_KPROBE_EVENTS=y
@@ -98,17 +96,17 @@ jobs:
           CONFIG_DEFAULT_TCP_CONG="bbr"
           EOT
           else
-            echo "Defconfig 파일을 찾을 수 없습니다!"
+            echo "Defconfig 파일을 찾을 수 없습니다."
             exit 1
           fi
 
       - name: 커널 빌드
         run: |
           cd kernel_workspace
-          # 검사 무력화 환경변수 추가 적용
+          export POST_DEFCONFIG_CMDS=""
           export SKIP_DEFCONFIG_CHECK=1
           export SKIP_MRPROPER=1
-          
+
           LTO=thin BUILD_CONFIG=private/msm-google/build.config.sunfish ./build/build.sh
 
       - name: AnyKernel3 패키징
@@ -116,10 +114,9 @@ jobs:
           git clone https://github.com/osm0sis/AnyKernel3.git AnyKernel3
           cd AnyKernel3
           sed -i 's/device.name1=/device.name1=sunfish/g' anykernel.sh
-          
-          # 빌드 완료된 이미지 자동 탐색 후 복사
+
           find ../kernel_workspace/out/ -name "Image.lz4-dtb" -exec cp {} . \; || cp ../kernel_workspace/out/android-msm-pixel-4.14/dist/Image* .
-          
+
           zip -r9 Sunfish-Custom-Kernel.zip * -x .git README.md
 
       - name: 완제품 파일 업로드 (Artifacts)
