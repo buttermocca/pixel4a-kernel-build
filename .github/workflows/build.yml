@@ -34,7 +34,7 @@ jobs:
           repo init -u https://android.googlesource.com/kernel/manifest -b android-msm-sunfish-4.14-android13 --depth=1
           repo sync -c -j$(nproc) --no-tags --no-clone-bundle
 
-      - name: KernelSU / KSU-Next / ReSuKiSU 최신 안정버전 자동 탐색 및 적용
+      - name: KernelSU / KSU-Next / ReSuKiSU 최신 안정버전 자동 순차 적용
         run: |
           export GIT_TERMINAL_PROMPT=0
           cd kernel_workspace/private/msm-google
@@ -45,12 +45,12 @@ jobs:
           SUCCESS=0
 
           clean_ksu() {
-            rm -rf drivers/kernelsu /tmp/ksu_src
-            git checkout -- drivers/Kconfig drivers/Makefile 2>/dev/null || true
+            rm -rf drivers/kernelsu
+            git checkout -- drivers/Kconfig drivers/Makefile 2>/devnull || true
           }
 
           # ====================================================
-          # [1단계] 공식 KernelSU 최신 안정 릴리즈
+          # [1단계] 공식 KernelSU (tiann/KernelSU) 최신 안정 태그
           # ====================================================
           echo ">>> [1단계] 공식 KernelSU 최신 안정 버전 검색 중..."
           KSU_TAG=$(git ls-remote --tags --refs https://github.com/tiann/KernelSU.git | awk -F'/' '{print $3}' | grep -E '^v[0-9]+' | sort -V | tail -n1)
@@ -58,10 +58,10 @@ jobs:
           if [ -n "$KSU_TAG" ]; then
             echo "발견된 KernelSU 최신 태그: $KSU_TAG"
             clean_ksu
-            git clone --depth 1 -b "$KSU_TAG" https://github.com/tiann/KernelSU.git drivers/kernelsu
+            git clone -b "$KSU_TAG" https://github.com/tiann/KernelSU.git drivers/kernelsu
 
             if patch -p1 --forward --directory=drivers/kernelsu < /tmp/susfs/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch; then
-              echo "--> 공식 KernelSU ($KSU_TAG) + SUSFS 패치 적용 성공!"
+              echo "--> [성공] 공식 KernelSU ($KSU_TAG) + SUSFS 패치 적용 성공!"
               if [ -f "drivers/kernelsu/kernel/Kconfig" ]; then
                 echo 'source "drivers/kernelsu/kernel/Kconfig"' >> drivers/Kconfig
                 echo 'obj-y += kernelsu/kernel/' >> drivers/Makefile
@@ -71,63 +71,69 @@ jobs:
               fi
               SUCCESS=1
             else
-              echo "--> 공식 KernelSU 최신버전 패치 거부됨. 2단계(KernelSU-Next)로 전환합니다."
+              echo "--> [실패] 공식 KernelSU 최신버전과 SUSFS 패치 불일치. 2단계(KernelSU-Next)로 전환합니다."
             fi
           fi
 
           # ====================================================
-          # [2단계] KernelSU-Next 최신 안정 릴리즈
+          # [2단계] KernelSU-Next (rifsxd/KernelSU-Next) 최신 안정 태그
           # ====================================================
           if [ $SUCCESS -eq 0 ]; then
             echo ">>> [2단계] KernelSU-Next 최신 안정 버전 검색 중..."
+            clean_ksu
+
             KSUN_TAG=$(git ls-remote --tags --refs https://github.com/rifsxd/KernelSU-Next.git | awk -F'/' '{print $3}' | grep -E '^v[0-9]+' | sort -V | tail -n1)
             if [ -z "$KSUN_TAG" ]; then
               KSUN_TAG="next"
             fi
+
             echo "발견된 KernelSU-Next 태그/브랜치: $KSUN_TAG"
-
-            clean_ksu
-            mkdir -p drivers/kernelsu
-            git clone --depth 1 -b "$KSUN_TAG" https://github.com/rifsxd/KernelSU-Next /tmp/ksu_src || git clone --depth 1 https://github.com/rifsxd/KernelSU-Next /tmp/ksu_src
-
-            if [ -d "/tmp/ksu_src/kernel" ]; then
-              cp -r /tmp/ksu_src/kernel/* drivers/kernelsu/
-            else
-              cp -r /tmp/ksu_src/* drivers/kernelsu/
+            if git clone -b "$KSUN_TAG" https://github.com/rifsxd/KernelSU-Next.git drivers/kernelsu; then
+              echo "--> [성공] KernelSU-Next ($KSUN_TAG) 저장소 직접 클론 완료!"
+              if [ -f "drivers/kernelsu/kernel/Kconfig" ]; then
+                echo 'source "drivers/kernelsu/kernel/Kconfig"' >> drivers/Kconfig
+                echo 'obj-y += kernelsu/kernel/' >> drivers/Makefile
+              else
+                echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
+                echo 'obj-y += kernelsu/' >> drivers/Makefile
+              fi
+              SUCCESS=1
             fi
-
-            echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
-            echo 'obj-y += kernelsu/' >> drivers/Makefile
-            SUCCESS=1
-            echo "--> KernelSU-Next ($KSUN_TAG) 적용 완료!"
           fi
 
           # ====================================================
-          # [3단계] ReSuKiSU 최신 안정 릴리즈
+          # [3단계] ReSuKiSU (rsuntk/ReSuKiSU) 최신 안정 태그
           # ====================================================
           if [ $SUCCESS -eq 0 ]; then
             echo ">>> [3단계] ReSuKiSU 최신 안정 버전 검색 중..."
-            RSKS_TAG=$(git ls-remote --tags --refs https://github.com/rsuntk/ReSuKiSU.git | awk -F'/' '{print $3}' | grep -E '^v[0-9]+' | sort -V | tail -n1)
-            echo "발견된 ReSuKiSU 태그/브랜치: $RSKS_TAG"
-
             clean_ksu
-            mkdir -p drivers/kernelsu
-            git clone --depth 1 -b "$RSKS_TAG" https://github.com/rsuntk/ReSuKiSU /tmp/ksu_src || git clone --depth 1 https://github.com/rsuntk/ReSuKiSU /tmp/ksu_src
 
-            if [ -d "/tmp/ksu_src/kernel" ]; then
-              cp -r /tmp/ksu_src/kernel/* drivers/kernelsu/
-            else
-              cp -r /tmp/ksu_src/* drivers/kernelsu/
+            RSKS_TAG=$(git ls-remote --tags --refs https://github.com/rsuntk/ReSuKiSU.git | awk -F'/' '{print $3}' | grep -E '^v[0-9]+' | sort -V | tail -n1)
+            if [ -z "$RSKS_TAG" ]; then
+              RSKS_TAG="main"
             fi
 
-            echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
-            echo 'obj-y += kernelsu/' >> drivers/Makefile
-            SUCCESS=1
-            echo "--> ReSuKiSU ($RSKS_TAG) 적용 완료!"
+            echo "발견된 ReSuKiSU 태그/브랜치: $RSKS_TAG"
+            if git clone -b "$RSKS_TAG" https://github.com/rsuntk/ReSuKiSU.git drivers/kernelsu; then
+              echo "--> [성공] ReSuKiSU ($RSKS_TAG) 저장소 직접 클론 완료!"
+              if [ -f "drivers/kernelsu/kernel/Kconfig" ]; then
+                echo 'source "drivers/kernelsu/kernel/Kconfig"' >> drivers/Kconfig
+                echo 'obj-y += kernelsu/kernel/' >> drivers/Makefile
+              else
+                echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
+                echo 'obj-y += kernelsu/' >> drivers/Makefile
+              fi
+              SUCCESS=1
+            fi
+          fi
+
+          if [ $SUCCESS -eq 0 ]; then
+            echo "에러: KernelSU / KSU-Next / ReSuKiSU 모듈을 다운로드하지 못했습니다."
+            exit 1
           fi
 
           # ====================================================
-          # 커널 소스 측 SUSFS 패치 (50_patch) 적용
+          # 커널 소스 측 SUSFS 패치 (50_patch) 및 susfs.o 연결
           # ====================================================
           echo ">>> 커널 소스 측 SUSFS 패치 적용 중..."
           cp -r /tmp/susfs/kernel_patches/fs/* fs/ || true
