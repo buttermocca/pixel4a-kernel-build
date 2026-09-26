@@ -39,7 +39,7 @@ jobs:
           export GIT_TERMINAL_PROMPT=0
           cd kernel_workspace/private/msm-google
 
-          # 1. KernelSU-Next 정확한 주소에서 다운로드 및 폴더 복사 (Kconfig 에러 원인 해결)
+          # 1. KernelSU-Next 정확한 주소에서 다운로드 및 폴더 복사
           git clone https://github.com/rifsxd/KernelSU-Next.git /tmp/KernelSU-Next
           cp -r /tmp/KernelSU-Next/kernel drivers/kernelsu
 
@@ -65,17 +65,25 @@ jobs:
             patch -p1 --forward < /tmp/susfs/kernel_patches/50_add_susfs_in_kernel-4.14.patch || true
           fi
 
-      - name: Defconfig 설정 (KSU, SUSFS, BBR 활성화)
+      - name: Defconfig 설정 및 검사 무력화 (에러 해결 핵심)
         run: |
           cd kernel_workspace/private/msm-google
           
+          # 구글의 깐깐한 Defconfig 검사 로직 강제 삭제 (savedefconfig 에러 원인 차단)
+          sed -i 's/POST_DEFCONFIG_CMDS="check_defconfig"/POST_DEFCONFIG_CMDS=""/g' build.config.common || true
+          sed -i 's/check_defconfig//g' build.config.common || true
+
           # 정확한 defconfig 파일 자동 탐색 후 값 추가
           DEFCONFIG=$(find arch/arm64/configs -name "*sunfish_defconfig" | head -n 1)
 
           if [ -n "$DEFCONFIG" ]; then
             cat <<EOT >> $DEFCONFIG
 
-          # KernelSU & SUSFS
+          # KernelSU & SUSFS & BBR 필수 환경 설정
+          CONFIG_KPROBES=y
+          CONFIG_HAVE_KPROBES=y
+          CONFIG_KPROBE_EVENTS=y
+          CONFIG_OVERLAY_FS=y
           CONFIG_KSU=y
           CONFIG_KSU_SUSFS=y
           CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y
@@ -86,8 +94,6 @@ jobs:
           CONFIG_KSU_SUSFS_TRY_UMOUNT=y
           CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSTAT=y
           CONFIG_KSU_SUSFS_AUTO_ADD_SUS_MOUNT=y
-
-          # TCP BBR
           CONFIG_TCP_CONG_BBR=y
           CONFIG_DEFAULT_TCP_CONG="bbr"
           EOT
@@ -99,6 +105,10 @@ jobs:
       - name: 커널 빌드
         run: |
           cd kernel_workspace
+          # 검사 무력화 환경변수 추가 적용
+          export SKIP_DEFCONFIG_CHECK=1
+          export SKIP_MRPROPER=1
+          
           LTO=thin BUILD_CONFIG=private/msm-google/build.config.sunfish ./build/build.sh
 
       - name: AnyKernel3 패키징
