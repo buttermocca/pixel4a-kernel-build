@@ -39,12 +39,9 @@ jobs:
           export GIT_TERMINAL_PROMPT=0
           cd kernel_workspace/private/msm-google
 
-          # 1. KernelSU-Next 다운로드 (주소 변경 대안 포함)
-          if ! git clone https://github.com/rifscall/KernelSU-Next.git drivers/kernelsu; then
-            if ! git clone https://github.com/KernelSU-Next/KernelSU-Next.git drivers/kernelsu; then
-              git clone https://github.com/tiann/KernelSU.git drivers/kernelsu
-            fi
-          fi
+          # 1. KernelSU-Next 정확한 주소에서 다운로드 및 폴더 복사 (Kconfig 에러 원인 해결)
+          git clone https://github.com/rifsxd/KernelSU-Next.git /tmp/KernelSU-Next
+          cp -r /tmp/KernelSU-Next/kernel drivers/kernelsu
 
           # Kconfig 및 Makefile 설정 연결
           grep -q "kernelsu" drivers/Kconfig || echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
@@ -63,17 +60,20 @@ jobs:
 
           # 커널 소스 패치 적용
           if [ -d "/tmp/susfs/kernel_patches" ]; then
-            cp /tmp/susfs/kernel_patches/fs/* fs/ || true
-            cp /tmp/susfs/kernel_patches/include/linux/* include/linux/ || true
+            cp -r /tmp/susfs/kernel_patches/fs/* fs/ || true
+            cp -r /tmp/susfs/kernel_patches/include/linux/* include/linux/ || true
             patch -p1 --forward < /tmp/susfs/kernel_patches/50_add_susfs_in_kernel-4.14.patch || true
           fi
 
       - name: Defconfig 설정 (KSU, SUSFS, BBR 활성화)
         run: |
           cd kernel_workspace/private/msm-google
-          DEFCONFIG="arch/arm64/configs/sunfish_defconfig"
+          
+          # 정확한 defconfig 파일 자동 탐색 후 값 추가
+          DEFCONFIG=$(find arch/arm64/configs -name "*sunfish_defconfig" | head -n 1)
 
-          cat <<EOT >> $DEFCONFIG
+          if [ -n "$DEFCONFIG" ]; then
+            cat <<EOT >> $DEFCONFIG
 
           # KernelSU & SUSFS
           CONFIG_KSU=y
@@ -91,6 +91,10 @@ jobs:
           CONFIG_TCP_CONG_BBR=y
           CONFIG_DEFAULT_TCP_CONG="bbr"
           EOT
+          else
+            echo "Defconfig 파일을 찾을 수 없습니다!"
+            exit 1
+          fi
 
       - name: 커널 빌드
         run: |
