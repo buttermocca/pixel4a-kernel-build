@@ -36,26 +36,37 @@ jobs:
 
       - name: KernelSU Next 및 SUSFS 패치 적용
         run: |
+          export GIT_TERMINAL_PROMPT=0
           cd kernel_workspace/private/msm-google
 
-          # 1. KernelSU-Next 직접 클론 및 설정 (404 에러 방지)
-          git clone https://github.com/rifscall/KernelSU-Next drivers/kernelsu
+          # 1. KernelSU-Next 다운로드 (주소 변경 대안 포함)
+          if ! git clone https://github.com/rifscall/KernelSU-Next.git drivers/kernelsu; then
+            if ! git clone https://github.com/KernelSU-Next/KernelSU-Next.git drivers/kernelsu; then
+              git clone https://github.com/tiann/KernelSU.git drivers/kernelsu
+            fi
+          fi
+
+          # Kconfig 및 Makefile 설정 연결
           grep -q "kernelsu" drivers/Kconfig || echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
           grep -q "kernelsu" drivers/Makefile || echo 'obj-y += kernelsu/' >> drivers/Makefile
 
           # 2. SUSFS 소스 클론 및 패치 적용
-          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b kernel-4.14 /tmp/susfs
+          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b kernel-4.14 /tmp/susfs || true
 
           # KSU 패치 적용
-          cp /tmp/susfs/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch drivers/kernelsu/ || true
-          cd drivers/kernelsu
-          patch -p1 --forward < 10_enable_susfs_for_ksu.patch || true
-          cd ../..
+          if [ -d "/tmp/susfs/kernel_patches/KernelSU" ]; then
+            cp /tmp/susfs/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch drivers/kernelsu/ || true
+            cd drivers/kernelsu
+            patch -p1 --forward < 10_enable_susfs_for_ksu.patch || true
+            cd ../..
+          fi
 
           # 커널 소스 패치 적용
-          cp /tmp/susfs/kernel_patches/fs/* fs/ || true
-          cp /tmp/susfs/kernel_patches/include/linux/* include/linux/ || true
-          patch -p1 --forward < /tmp/susfs/kernel_patches/50_add_susfs_in_kernel-4.14.patch || true
+          if [ -d "/tmp/susfs/kernel_patches" ]; then
+            cp /tmp/susfs/kernel_patches/fs/* fs/ || true
+            cp /tmp/susfs/kernel_patches/include/linux/* include/linux/ || true
+            patch -p1 --forward < /tmp/susfs/kernel_patches/50_add_susfs_in_kernel-4.14.patch || true
+          fi
 
       - name: Defconfig 설정 (KSU, SUSFS, BBR 활성화)
         run: |
