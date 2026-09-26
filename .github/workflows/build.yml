@@ -36,11 +36,12 @@ jobs:
 
       - name: KernelSU Next 및 SUSFS 패치 적용
         run: |
-          # pixel 4a 커널 경로인 private/msm-google 로 이동
           cd kernel_workspace/private/msm-google
 
-          # 1. KernelSU-Next 설치
-          curl -LSs "https://raw.githubusercontent.com/rifscall/KernelSU-Next/next/kernel/setup.sh" | bash -s next
+          # 1. KernelSU-Next 직접 클론 및 설정 (404 에러 방지)
+          git clone https://github.com/rifscall/KernelSU-Next drivers/kernelsu
+          grep -q "kernelsu" drivers/Kconfig || echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
+          grep -q "kernelsu" drivers/Makefile || echo 'obj-y += kernelsu/' >> drivers/Makefile
 
           # 2. SUSFS 소스 클론 및 패치 적용
           git clone https://gitlab.com/simonpunk/susfs4ksu.git -b kernel-4.14 /tmp/susfs
