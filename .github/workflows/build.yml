@@ -1,4 +1,4 @@
-name: Build Pixel 4a Kernel (KernelSU + SUSFS + BBR)
+name: Build Pixel 4a Kernel (Auto KSU/KSU-Next/RSKS + SUSFS + BBR)
 
 on:
   workflow_dispatch:
@@ -34,36 +34,109 @@ jobs:
           repo init -u https://android.googlesource.com/kernel/manifest -b android-msm-sunfish-4.14-android13 --depth=1
           repo sync -c -j$(nproc) --no-tags --no-clone-bundle
 
-      - name: KernelSU 및 SUSFS 패치 적용 (100% 호환 구조)
+      - name: KernelSU / KSU-Next / ReSuKiSU 최신 안정버전 자동 탐색 및 적용
         run: |
           export GIT_TERMINAL_PROMPT=0
           cd kernel_workspace/private/msm-google
 
-          # 1. 공식 KernelSU 소스 클론 (SUSFS 패치와 100% 일치)
-          rm -rf drivers/kernelsu
-          git clone https://github.com/tiann/KernelSU.git drivers/kernelsu
-
-          grep -q "kernelsu" drivers/Kconfig || echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
-          grep -q "kernelsu" drivers/Makefile || echo 'obj-y += kernelsu/' >> drivers/Makefile
-
-          # 2. SUSFS 4.14 전용 소스 클론
+          # SUSFS 4.14 패치 다운로드
           git clone https://gitlab.com/simonpunk/susfs4ksu.git -b kernel-4.14 /tmp/susfs
 
-          # 3. KernelSU 전용 SUSFS 패치 적용 (10_patch)
-          if [ -f "/tmp/susfs/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch" ]; then
-            cd drivers/kernelsu
-            patch -p1 < /tmp/susfs/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch
-            cd ../..
+          SUCCESS=0
+
+          clean_ksu() {
+            rm -rf drivers/kernelsu /tmp/ksu_src
+            git checkout -- drivers/Kconfig drivers/Makefile 2>/dev/null || true
+          }
+
+          # ====================================================
+          # [1단계] 공식 KernelSU 최신 안정 릴리즈
+          # ====================================================
+          echo ">>> [1단계] 공식 KernelSU 최신 안정 버전 검색 중..."
+          KSU_TAG=$(git ls-remote --tags --refs https://github.com/tiann/KernelSU.git | awk -F'/' '{print $3}' | grep -E '^v[0-9]+' | sort -V | tail -n1)
+
+          if [ -n "$KSU_TAG" ]; then
+            echo "발견된 KernelSU 최신 태그: $KSU_TAG"
+            clean_ksu
+            git clone --depth 1 -b "$KSU_TAG" https://github.com/tiann/KernelSU.git drivers/kernelsu
+
+            if patch -p1 --forward --directory=drivers/kernelsu < /tmp/susfs/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch; then
+              echo "--> 공식 KernelSU ($KSU_TAG) + SUSFS 패치 적용 성공!"
+              if [ -f "drivers/kernelsu/kernel/Kconfig" ]; then
+                echo 'source "drivers/kernelsu/kernel/Kconfig"' >> drivers/Kconfig
+                echo 'obj-y += kernelsu/kernel/' >> drivers/Makefile
+              else
+                echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
+                echo 'obj-y += kernelsu/' >> drivers/Makefile
+              fi
+              SUCCESS=1
+            else
+              echo "--> 공식 KernelSU 최신버전 패치 거부됨. 2단계(KernelSU-Next)로 전환합니다."
+            fi
           fi
 
-          # 4. 커널 소스 전용 SUSFS 패치 적용 (50_patch 및 파일 복사)
-          cp -r /tmp/susfs/kernel_patches/fs/* fs/
-          cp -r /tmp/susfs/kernel_patches/include/linux/* include/linux/
-          
-          # fs/Makefile에 susfs.o 빌드 명시
-          grep -q "susfs.o" fs/Makefile || echo 'obj-$(CONFIG_KSU_SUSFS) += susfs.o' >> fs/Makefile
+          # ====================================================
+          # [2단계] KernelSU-Next 최신 안정 릴리즈
+          # ====================================================
+          if [ $SUCCESS -eq 0 ]; then
+            echo ">>> [2단계] KernelSU-Next 최신 안정 버전 검색 중..."
+            KSUN_TAG=$(git ls-remote --tags --refs https://github.com/rifsxd/KernelSU-Next.git | awk -F'/' '{print $3}' | grep -E '^v[0-9]+' | sort -V | tail -n1)
+            if [ -z "$KSUN_TAG" ]; then
+              KSUN_TAG="next"
+            fi
+            echo "발견된 KernelSU-Next 태그/브랜치: $KSUN_TAG"
 
-          patch -p1 < /tmp/susfs/kernel_patches/50_add_susfs_in_kernel-4.14.patch
+            clean_ksu
+            mkdir -p drivers/kernelsu
+            git clone --depth 1 -b "$KSUN_TAG" https://github.com/rifsxd/KernelSU-Next /tmp/ksu_src || git clone --depth 1 https://github.com/rifsxd/KernelSU-Next /tmp/ksu_src
+
+            if [ -d "/tmp/ksu_src/kernel" ]; then
+              cp -r /tmp/ksu_src/kernel/* drivers/kernelsu/
+            else
+              cp -r /tmp/ksu_src/* drivers/kernelsu/
+            fi
+
+            echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
+            echo 'obj-y += kernelsu/' >> drivers/Makefile
+            SUCCESS=1
+            echo "--> KernelSU-Next ($KSUN_TAG) 적용 완료!"
+          fi
+
+          # ====================================================
+          # [3단계] ReSuKiSU 최신 안정 릴리즈
+          # ====================================================
+          if [ $SUCCESS -eq 0 ]; then
+            echo ">>> [3단계] ReSuKiSU 최신 안정 버전 검색 중..."
+            RSKS_TAG=$(git ls-remote --tags --refs https://github.com/rsuntk/ReSuKiSU.git | awk -F'/' '{print $3}' | grep -E '^v[0-9]+' | sort -V | tail -n1)
+            echo "발견된 ReSuKiSU 태그/브랜치: $RSKS_TAG"
+
+            clean_ksu
+            mkdir -p drivers/kernelsu
+            git clone --depth 1 -b "$RSKS_TAG" https://github.com/rsuntk/ReSuKiSU /tmp/ksu_src || git clone --depth 1 https://github.com/rsuntk/ReSuKiSU /tmp/ksu_src
+
+            if [ -d "/tmp/ksu_src/kernel" ]; then
+              cp -r /tmp/ksu_src/kernel/* drivers/kernelsu/
+            else
+              cp -r /tmp/ksu_src/* drivers/kernelsu/
+            fi
+
+            echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
+            echo 'obj-y += kernelsu/' >> drivers/Makefile
+            SUCCESS=1
+            echo "--> ReSuKiSU ($RSKS_TAG) 적용 완료!"
+          fi
+
+          # ====================================================
+          # 커널 소스 측 SUSFS 패치 (50_patch) 적용
+          # ====================================================
+          echo ">>> 커널 소스 측 SUSFS 패치 적용 중..."
+          cp -r /tmp/susfs/kernel_patches/fs/* fs/ || true
+          cp -r /tmp/susfs/kernel_patches/include/linux/* include/linux/ || true
+
+          patch -p1 --forward < /tmp/susfs/kernel_patches/50_add_susfs_in_kernel-4.14.patch || true
+
+          grep -q "susfs.o" fs/Makefile || echo 'obj-$(CONFIG_KSU_SUSFS) += susfs.o' >> fs/Makefile
+          grep -q "susfs.o" fs/Makefile || echo 'obj-y += susfs.o' >> fs/Makefile
 
       - name: Defconfig 설정 및 구글 검사 로직 완전 무력화
         run: |
@@ -74,7 +147,7 @@ jobs:
           find . -name "build.config*" -exec sh -c 'echo "POST_DEFCONFIG_CMDS=\"\"" >> "$1"' _ {} \;
           find ../build/ -type f -exec sed -i 's/check_defconfig//g' {} + 2>/devnull || true
 
-          # sunfish_defconfig 옵션 주입
+          # sunfish_defconfig 옵션 강제 주입
           DEFCONFIG=$(find arch/arm64/configs -name "*sunfish_defconfig" | head -n 1)
 
           if [ -n "$DEFCONFIG" ]; then
