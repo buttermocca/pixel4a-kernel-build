@@ -2,6 +2,31 @@ name: Build Pixel 4a Sunfish Kernel
 
 on:
   workflow_dispatch:
+    inputs:
+      ksun_ref:
+        description: >-
+          KernelSU-Next 커밋(전체 SHA). 이 값과 susfs_ref가 서로 다른
+          시점의 API를 기대하면 9단계(ABI 사전검사)에서 실패한다.
+        required: false
+        default: d999a2aff11575c6e2f520129ecffb7c6058fb02
+      ksu_version_tag:
+        description: KSU_VERSION_TAG (ksun_ref와 짝이 맞는 태그 문자열)
+        required: false
+        default: v3.4.0-legacy-susfs-v2
+      susfs_repo:
+        description: >-
+          SUSFS 저장소 URL. kernel-4.14 브랜치가 ksun_ref와 계속
+          어긋나면 대체 포크(예: 특정 fork의 legacy 브랜치)로 바꿔서
+          재시도해볼 수 있다.
+        required: false
+        default: https://gitlab.com/simonpunk/susfs4ksu.git
+      susfs_ref:
+        description: >-
+          SUSFS 브랜치명 또는 커밋 SHA. 브랜치명("kernel-4.14")은
+          흘러가는 참조라 오늘 성공해도 내일 다시 깨질 수 있으니,
+          한 번 호환 커밋을 찾으면 그 커밋 SHA로 고정할 것.
+        required: false
+        default: kernel-4.14
 
 permissions:
   contents: read
@@ -10,14 +35,18 @@ env:
   KERNEL_BRANCH: android-msm-sunfish-4.14-android13
 
   # Pinned KernelSU-Next legacy SUSFS tree.
+  # workflow_dispatch 입력이 있으면 그 값을, 없으면(예: 다른 트리거) 기본값을 쓴다.
   KSUN_REPO: https://github.com/sidex15/KernelSU-Next.git
-  KSUN_REF: d999a2aff11575c6e2f520129ecffb7c6058fb02
-  KSU_GIT_VERSION: d999a2aff11575c6e2f520129ecffb7c6058fb02
-  KSU_VERSION_TAG: v3.4.0-legacy-susfs-v2
+  KSUN_REF: ${{ github.event.inputs.ksun_ref || 'd999a2aff11575c6e2f520129ecffb7c6058fb02' }}
+  KSU_GIT_VERSION: ${{ github.event.inputs.ksun_ref || 'd999a2aff11575c6e2f520129ecffb7c6058fb02' }}
+  KSU_VERSION_TAG: ${{ github.event.inputs.ksu_version_tag || 'v3.4.0-legacy-susfs-v2' }}
 
   # SUSFS Linux 4.14 patch tree.
-  SUSFS_REPO: https://gitlab.com/simonpunk/susfs4ksu.git
-  SUSFS_REF: kernel-4.14
+  # SUSFS_REF는 브랜치명뿐 아니라 임의의 커밋 SHA도 받을 수 있도록
+  # 아래 "SUSFS 4.14 통합" 단계에서 --depth=1 shallow clone 대신
+  # 전체 히스토리를 받아온 뒤 checkout한다 (자세한 이유는 해당 단계 주석 참고).
+  SUSFS_REPO: ${{ github.event.inputs.susfs_repo || 'https://gitlab.com/simonpunk/susfs4ksu.git' }}
+  SUSFS_REF: ${{ github.event.inputs.susfs_ref || 'kernel-4.14' }}
 
   # NoMount legacy built-in integration.
   NOMOUNT_REPO: https://github.com/maxsteeel/nomount.git
@@ -173,10 +202,19 @@ jobs:
           git checkout --detach "${KSUN_REF}"
 
           KSUN_COMMIT="$(git rev-parse HEAD)"
+          KSUN_COMMIT_DATE="$(git show -s --format=%ci HEAD)"
 
           test "${KSUN_COMMIT}" = "${KSUN_REF}"
 
-          echo "KernelSU-Next HEAD: ${KSUN_COMMIT}"
+          echo "KernelSU-Next HEAD:        ${KSUN_COMMIT}"
+          echo "KernelSU-Next commit date: ${KSUN_COMMIT_DATE}"
+          # 이 값을 9단계(ABI 사전검사)에서 다시 출력하는 SUSFS 커밋
+          # 일자와 나란히 비교하면, 두 트리의 "시점"이 서로 얼마나
+          # 떨어져 있는지 감을 잡는 데 도움이 된다. 완벽한 증거는
+          # 아니지만(브랜치가 항상 시간 순으로 기능을 추가하는 건
+          # 아니므로), 최소한 "SUSFS 쪽이 몇 달 더 오래된 스냅샷"
+          # 같은 명백한 어긋남은 바로 눈에 띈다.
+          echo "${KSUN_COMMIT_DATE}" > "${GITHUB_WORKSPACE}/ksun_commit_date.txt"
 
           # Verify the actual source layout in KernelSU-Next
           test -f kernel/Kbuild
@@ -227,6 +265,7 @@ jobs:
           #      지시자를 사용해 이후의 일반 대입이 값을 덮어쓰지
           #      못하게 고정해야 한다.
           python3 <<'PY'
+          import os
           from pathlib import Path
 
           kbuild_path = Path("drivers/kernelsu/Kbuild")
@@ -251,10 +290,18 @@ jobs:
                       sanitized.append(line)
                       in_continuation = False
 
+              # 주의: 예전에는 아래 두 값이 문자열로 하드코딩되어 있었다.
+              # workflow_dispatch로 KSUN_REF/KSU_VERSION_TAG를 바꿔도
+              # 이 헤더가 옛날 값을 계속 박아 넣으면, 실제 체크아웃한
+              # 커밋과 커널에 새겨지는 버전 문자열이 어긋나 디버깅할 때
+              # 혼란을 준다. 워크플로 env로 내려온 실제 값을 읽는다.
+              ksu_git_version = os.environ["KSU_GIT_VERSION"]
+              ksu_version_tag = os.environ["KSU_VERSION_TAG"]
+
               header = [
                   "override CONFIG_KSU_MANUAL_HOOK := y",
-                  "override KSU_GIT_VERSION := d999a2aff11575c6e2f520129ecffb7c6058fb02",
-                  "override KSU_VERSION_TAG := v3.4.0-legacy-susfs-v2",
+                  f"override KSU_GIT_VERSION := {ksu_git_version}",
+                  f"override KSU_VERSION_TAG := {ksu_version_tag}",
               ]
 
               kbuild_path.write_text("\n".join(header + sanitized) + "\n")
@@ -586,17 +633,31 @@ jobs:
 
           rm -rf SUSFS
 
+          # 주의: 예전에는 `--depth=1 --branch "${SUSFS_REF}"` 로 얕은
+          # clone을 했는데, 이 방식은 SUSFS_REF가 "브랜치/태그 이름"일
+          # 때만 동작하고, 특정 커밋 SHA로 고정하고 싶어도 그 커밋이
+          # 최신 HEAD가 아니면 shallow fetch가 실패한다.
+          #
+          # kernel-4.14는 흘러가는 브랜치라서(아래 "SUSFS-KernelSU ABI
+          # 사전검사" 단계 참고), 언젠가 이 브랜치의 과거 특정 커밋을
+          # SUSFS_REF로 고정해야 할 일이 반드시 생긴다. 그래서 전체
+          # 히스토리를 받아온 뒤 checkout하는 방식으로 바꿨다: 브랜치
+          # 이름이든 임의의 커밋 SHA든 둘 다 그대로 동작한다.
+          # (트레이드오프: clone이 이전보다 다소 느려진다.)
           git clone \
-            --depth=1 \
-            --branch "${SUSFS_REF}" \
             "${SUSFS_REPO}" \
             SUSFS
 
           cd SUSFS
 
-          SUSFS_COMMIT="$(git rev-parse HEAD)"
+          git checkout --detach "${SUSFS_REF}"
 
-          echo "SUSFS commit: ${SUSFS_COMMIT}"
+          SUSFS_COMMIT="$(git rev-parse HEAD)"
+          SUSFS_COMMIT_DATE="$(git show -s --format=%ci HEAD)"
+
+          echo "SUSFS ref requested: ${SUSFS_REF}"
+          echo "SUSFS commit:        ${SUSFS_COMMIT}"
+          echo "SUSFS commit date:   ${SUSFS_COMMIT_DATE}"
 
           test -f kernel_patches/50_add_susfs_in_kernel-4.14.patch
           test -f kernel_patches/fs/susfs.c
@@ -725,29 +786,100 @@ jobs:
             fi
           done
 
-          if [ "${#MISSING[@]}" -gt 0 ]; then
+          # ------------------------------------------------------------
+          # 2026-09-27 업데이트: 처음 이 프리플라이트를 도입했을 때는
+          # "누락 = 무조건 빌드 실패"로만 처리했다. 그런데 실제로
+          # 겪어보니, 누락 목록에 susfs_add_sus_map / susfs_add_sus_memfd
+          # 처럼 이 워크플로가 "Sunfish defconfig 설정" 단계에서 이미
+          # CONFIG_KSU_SUSFS_SUS_MAP / CONFIG_KSU_SUSFS_SUS_MEMFD 를
+          # 의도적으로 비활성화하는(그리고 "빌드 결과 검증" 단계가
+          # require_not_y로 재확인하는) 기능의 심볼도 섞여 나온다.
+          #
+          # 이 grep 기반 프리플라이트는 텍스트만 보고 #ifdef 여부를
+          # 모르기 때문에, 해당 심볼 호출부가 어차피 컴파일 대상에서
+          # 빠질 #ifdef CONFIG_KSU_SUSFS_SUS_MAP/SUS_MEMFD 블록 안에
+          # 있어도 "누락"으로 잡아버린다 (오탐 가능성). 그래서 아래
+          # 이름 패턴에 걸리는 심볼만 "정보성 경고"로 낮추고, 나머지는
+          # 예전처럼 그대로 빌드를 막는다.
+          #
+          # 이 예외 처리는 "SUS_MAP/SUS_MEMFD가 이 워크플로에서 항상
+          # 비활성 상태"라는, defconfig/검증 단계와 지금 손으로 맞춰본
+          # 가정에 기대고 있다. 만약 나중에 저 두 옵션을 켜게 된다면
+          # 이 예외 목록도 반드시 같이 지워야 한다. 그리고 이 예외가
+          # 틀렸을 경우(실제로는 #ifdef 밖에서 무조건 호출되는 경우)
+          # 프리플라이트는 통과하겠지만, 뒤이은 "커널 빌드" 단계가
+          # 실제 컴파일러 에러(예: undefined reference / implicit
+          # declaration)로 잡아줄 것이고, 그 단계는 이미 에러 로그를
+          # 자동으로 추려서 보여주도록 되어 있다.
+          KNOWN_DISABLED_FEATURE_PATTERN='sus_map|sus_memfd'
+
+          REAL_MISSING=()
+          IGNORED_MISSING=()
+
+          for sym in "${MISSING[@]:-}"; do
+            [ -z "${sym}" ] && continue
+
+            if [[ "${sym}" =~ ${KNOWN_DISABLED_FEATURE_PATTERN} ]]; then
+              IGNORED_MISSING+=("${sym}")
+            else
+              REAL_MISSING+=("${sym}")
+            fi
+          done
+
+          if [ "${#IGNORED_MISSING[@]}" -gt 0 ]; then
+            echo
+            echo "-- 정보: 아래 심볼은 SUS_MAP/SUS_MEMFD 관련으로 보여,"
+            echo "   이 워크플로가 defconfig에서 항상 비활성화하는"
+            echo "   기능과 연관된 것으로 추정하고 빌드를 막지 않는다."
+            echo "   (가정이 틀렸다면 '커널 빌드' 단계에서 컴파일러가"
+            echo "   진짜 에러로 잡아줄 것이다.)"
+            for sym in "${IGNORED_MISSING[@]}"; do
+              echo "     - ${sym}"
+            done
+          fi
+
+          if [ "${#REAL_MISSING[@]}" -gt 0 ]; then
+            KSUN_COMMIT_DATE="$(cat "${GITHUB_WORKSPACE}/ksun_commit_date.txt" 2>/dev/null || echo unknown)"
+
             echo
             echo "=================================================="
             echo "ERROR: KernelSU-Next / SUSFS ABI mismatch"
             echo "=================================================="
-            echo "KernelSU-Next ${KSUN_REF} (tag ${KSU_VERSION_TAG}) calls"
-            echo "the following symbol(s), but SUSFS ${SUSFS_REPO}"
+            echo "KernelSU-Next ${KSUN_REF} (tag ${KSU_VERSION_TAG})"
+            echo "  commit date: ${KSUN_COMMIT_DATE}"
+            echo "calls the following symbol(s), but SUSFS ${SUSFS_REPO}"
             echo "(ref: ${SUSFS_REF}) does not define/declare them anywhere"
             echo "in the kernel tree:"
             echo
-            for sym in "${MISSING[@]}"; do
+            for sym in "${REAL_MISSING[@]}"; do
               echo "  - ${sym}"
             done
             echo
-            echo "이 심볼들에 대해 include/linux/susfs.h / fs/susfs.c에"
-            echo "선언+스텁(또는 실제 구현)을 추가하거나, SUSFS_REF를"
-            echo "KernelSU-Next 커밋과 실제로 호환되는 고정 커밋으로"
-            echo "바꿔야 한다."
+            echo "이 심볼들은 SID 스푸핑 / AVC 로그 위조 / sdcard 감시"
+            echo "스레드처럼 실제 동작이 있는 기능이라, 빈 no-op 스텁을"
+            echo "덧붙이는 방식은 권장하지 않는다 (반환형을 모르면"
+            echo "컴파일이 깨지거나, 맞더라도 은닉 기능이 조용히"
+            echo "무력화될 수 있다)."
+            echo
+            echo "대신 다음을 시도할 것:"
+            echo "  1) SUSFS_REF를 흘러가는 브랜치명(kernel-4.14) 대신"
+            echo "     이 KernelSU-Next 커밋과 실제로 호환되는 SUSFS"
+            echo "     커밋 SHA로 고정한다. 후보를 찾으려면:"
+            echo "     https://gitlab.com/simonpunk/susfs4ksu/-/commits/kernel-4.14"
+            echo "     의 커밋 이력에서 위 심볼들이 추가된 지점을 찾는다."
+            echo "  2) 또는 sidex15/KernelSU-Next 저장소의 이슈/PR에서"
+            echo "     위 심볼명으로 검색해 이미 정리된 호환 조합이"
+            echo "     있는지 확인한다(예: PR #12 'Legacy susfs v2 pr"
+            echo "     clean'은 이 legacy-susfs-v2 브랜치를 msm-4.9/"
+            echo "     msm-4.14에 이식하며 겪은 문제들을 다룬다)."
+            echo "  3) workflow_dispatch 입력(ksun_ref / susfs_ref)으로"
+            echo "     후보 조합을 YAML 수정 없이 바로 재시도해볼 수"
+            echo "     있다."
             echo "=================================================="
             exit 1
           fi
 
-          echo "KernelSU-Next / SUSFS ABI preflight: OK (${#CALLED_SYMS[@]} symbol(s) checked)."
+          echo "KernelSU-Next / SUSFS ABI preflight: OK (${#CALLED_SYMS[@]} symbol(s) checked, ${#IGNORED_MISSING[@]} informational)."
 
       - name: NoMount 통합
         shell: bash
