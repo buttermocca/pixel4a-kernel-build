@@ -198,10 +198,17 @@ jobs:
           mkdir -p drivers/kernelsu/policy
           cp -r KernelSU-Next/uapi drivers/kernelsu/policy/uapi
 
-          # make mrproper 및 Kbuild 평가 시 자동 패처가 동작하지 않도록 변수 강제 대입 (:=)
-          sed -i '1i CONFIG_KSU_MANUAL_HOOK := y' drivers/kernelsu/Kbuild
-          sed -i '1i KSU_GIT_VERSION := d999a2aff11575c6e2f520129ecffb7c6058fb02' drivers/kernelsu/Kbuild
-          sed -i '1i KSU_VERSION_TAG := v3.4.0-legacy-susfs-v2' drivers/kernelsu/Kbuild
+          # [핵심 1] drivers/kernelsu 내부의 모든 자동 파이썬 패처 무력화
+          find drivers/kernelsu -type f -name "*.py" -exec bash -c 'echo "import sys; sys.exit(0)" > "$1"' _ {} \;
+
+          # [핵심 2] Kbuild 상단에 Manual Hook 및 버전 정보 변수 대입
+          cat << 'EOF' > drivers/kernelsu/Kbuild.tmp
+          CONFIG_KSU_MANUAL_HOOK := y
+          KSU_GIT_VERSION := d999a2aff11575c6e2f520129ecffb7c6058fb02
+          KSU_VERSION_TAG := v3.4.0-legacy-susfs-v2
+          EOF
+          cat drivers/kernelsu/Kbuild >> drivers/kernelsu/Kbuild.tmp
+          mv drivers/kernelsu/Kbuild.tmp drivers/kernelsu/Kbuild
 
           test -d drivers/kernelsu
           test -f drivers/kernelsu/Kbuild
