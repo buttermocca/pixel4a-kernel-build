@@ -149,8 +149,7 @@ jobs:
 
           cd "${KROOT}"
 
-          rm -rf KernelSU-Next
-          rm -f drivers/kernelsu
+          rm -rf drivers/kernelsu KernelSU-Next
 
           echo "KernelSU-Next repository: ${KSUN_REPO}"
           echo "KernelSU-Next commit:     ${KSUN_REF}"
@@ -158,9 +157,9 @@ jobs:
           git clone \
             --filter=blob:none \
             "${KSUN_REPO}" \
-            KernelSU-Next
+            drivers/kernelsu
 
-          cd KernelSU-Next
+          cd drivers/kernelsu
 
           git checkout --detach "${KSUN_REF}"
 
@@ -171,29 +170,25 @@ jobs:
           echo "KernelSU-Next HEAD: ${KSUN_COMMIT}"
 
           # Verify the actual source layout before integration.
-          test -f kernel/Kbuild
-          test -f kernel/Kconfig
-          test -f kernel/core/init.c
-          test -f kernel/policy/allowlist.h
-          test -f kernel/policy/app_profile.h
+          test -f Kbuild
+          test -f Kconfig
+          test -f core/init.c
+          test -f policy/allowlist.h
+          test -f policy/app_profile.h
           test -f uapi/app_profile.h
 
           # This branch must expose the legacy manual-hook and SUSFS
           # configuration symbols.
-          grep -Fq 'config KSU_MANUAL_HOOK' kernel/Kconfig
-          grep -Fq 'config KSU_SUSFS' kernel/Kconfig
+          grep -Fq 'config KSU_MANUAL_HOOK' Kconfig
+          grep -Fq 'config KSU_SUSFS' Kconfig
 
           # policy/app_profile.h includes uapi/app_profile.h.
-          ln -sfn ../uapi kernel/uapi
-          test -f kernel/uapi/app_profile.h
+          ln -sfn ../uapi policy/uapi
+          test -f policy/uapi/app_profile.h
 
           cd "${KROOT}"
 
-          # Preserve the complete KernelSU-Next repository while the
-          # kernel build sees its kernel/ subdirectory as drivers/kernelsu.
-          ln -s ../../KernelSU-Next/kernel drivers/kernelsu
-
-          test -L drivers/kernelsu
+          test -d drivers/kernelsu
           test -f drivers/kernelsu/Kbuild
           test -f drivers/kernelsu/Kconfig
 
@@ -291,10 +286,6 @@ jobs:
 
           # ============================================================
           # fs/exec.c
-          #
-          # Official legacy manual-hook layout:
-          # call from do_execve() and compat_do_execve() before the
-          # do_execveat_common() call.
           # ============================================================
           exec_decl = r'''
           #ifdef CONFIG_KSU
@@ -538,9 +529,6 @@ jobs:
 
           cd "${KROOT}"
 
-          # Do NOT apply 10_enable_susfs_for_ksu.patch here.
-          # KernelSU-Next is already a SUSFS-integrated legacy tree.
-
           rsync -a \
             SUSFS/kernel_patches/fs/ \
             fs/
@@ -549,7 +537,6 @@ jobs:
             SUSFS/kernel_patches/include/linux/ \
             include/linux/
 
-          # Fail closed on any incompatible hunk.
           git apply \
             --check \
             SUSFS/kernel_patches/50_add_susfs_in_kernel-4.14.patch
@@ -575,10 +562,7 @@ jobs:
 
           cd "${KROOT}"
 
-          # The selected KernelSU-Next d999a2af tree uses newer SUSFS-side
-          # helpers. The simonpunk kernel-4.14 tree is an older SUSFS tree.
-          # Detect this mismatch before the compiler produces opaque errors.
-          if grep -Rqs 'susfs_extra_works' KernelSU-Next/kernel && \
+          if grep -Rqs 'susfs_extra_works' drivers/kernelsu && \
              ! grep -Rqs 'susfs_extra_works' fs include/linux; then
 
             echo
@@ -708,8 +692,6 @@ jobs:
           set_bool KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG y
           set_bool KSU_SUSFS_OPEN_REDIRECT y
 
-          # These newer SUSFS features are disabled because the selected
-          # kernel-4.14 SUSFS tree does not provide their v2.x code.
           disable_bool KSU_SUSFS_SUS_MAP
           disable_bool KSU_SUSFS_SUS_MEMFD
 
@@ -846,7 +828,7 @@ jobs:
             exit 1
           }
 
-          test -L drivers/kernelsu
+          test -d drivers/kernelsu
           test -f drivers/kernelsu/Kbuild
           test -f drivers/kernelsu/Kconfig
           test -f drivers/kernelsu/uapi/app_profile.h
@@ -882,7 +864,7 @@ jobs:
             echo "KERNEL_VERSION=${KERNEL_VERSION}"
             echo "KSUN_REPO=${KSUN_REPO}"
             echo "KSUN_REF=${KSUN_REF}"
-            echo "KSUN_COMMIT=$(git -C KernelSU-Next rev-parse HEAD)"
+            echo "KSUN_COMMIT=$(git -C drivers/kernelsu rev-parse HEAD)"
             echo "SUSFS_REPO=${SUSFS_REPO}"
             echo "SUSFS_REF=${SUSFS_REF}"
             echo "SUSFS_COMMIT=$(git -C SUSFS rev-parse HEAD)"
