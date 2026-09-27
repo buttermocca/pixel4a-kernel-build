@@ -60,6 +60,7 @@ jobs:
             libssl-dev \
             libsqlite3-dev \
             lz4 \
+            patch \
             pkg-config \
             python3 \
             python-is-python3 \
@@ -541,12 +542,7 @@ jobs:
             SUSFS/kernel_patches/include/linux/ \
             include/linux/
 
-          git apply \
-            --check \
-            SUSFS/kernel_patches/50_add_susfs_in_kernel-4.14.patch
-
-          git apply \
-            SUSFS/kernel_patches/50_add_susfs_in_kernel-4.14.patch
+          patch -p1 --forward --batch < SUSFS/kernel_patches/50_add_susfs_in_kernel-4.14.patch
 
           test -f fs/susfs.c
           test -f include/linux/susfs.h
