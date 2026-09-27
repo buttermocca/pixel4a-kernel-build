@@ -157,9 +157,9 @@ jobs:
           git clone \
             --filter=blob:none \
             "${KSUN_REPO}" \
-            drivers/kernelsu
+            KernelSU-Next
 
-          cd drivers/kernelsu
+          cd KernelSU-Next
 
           git checkout --detach "${KSUN_REF}"
 
@@ -169,28 +169,32 @@ jobs:
 
           echo "KernelSU-Next HEAD: ${KSUN_COMMIT}"
 
-          # Verify the actual source layout before integration.
-          test -f Kbuild
-          test -f Kconfig
-          test -f core/init.c
-          test -f policy/allowlist.h
-          test -f policy/app_profile.h
+          # Verify the actual source layout in KernelSU-Next
+          test -f kernel/Kbuild
+          test -f kernel/Kconfig
+          test -f kernel/core/init.c
+          test -f kernel/policy/allowlist.h
+          test -f kernel/policy/app_profile.h
           test -f uapi/app_profile.h
 
-          # This branch must expose the legacy manual-hook and SUSFS
-          # configuration symbols.
-          grep -Fq 'config KSU_MANUAL_HOOK' Kconfig
-          grep -Fq 'config KSU_SUSFS' Kconfig
-
-          # policy/app_profile.h includes uapi/app_profile.h.
-          ln -sfn ../uapi policy/uapi
-          test -f policy/uapi/app_profile.h
+          # Verify manual hook and SUSFS symbols
+          grep -Fq 'config KSU_MANUAL_HOOK' kernel/Kconfig
+          grep -Fq 'config KSU_SUSFS' kernel/Kconfig
 
           cd "${KROOT}"
+
+          # Deploy KernelSU-Next into drivers/kernelsu
+          cp -r KernelSU-Next/kernel drivers/kernelsu
+          cp -r KernelSU-Next/uapi drivers/kernelsu/uapi
+          mkdir -p drivers/kernelsu/policy
+          cp -r KernelSU-Next/uapi drivers/kernelsu/policy/uapi
+          cp -r KernelSU-Next/.git drivers/kernelsu/.git
 
           test -d drivers/kernelsu
           test -f drivers/kernelsu/Kbuild
           test -f drivers/kernelsu/Kconfig
+          test -f drivers/kernelsu/uapi/app_profile.h
+          test -f drivers/kernelsu/policy/uapi/app_profile.h
 
           grep -Fqx \
             'obj-$(CONFIG_KSU) += kernelsu/' \
