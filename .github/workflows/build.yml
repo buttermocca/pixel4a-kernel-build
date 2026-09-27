@@ -545,7 +545,7 @@ jobs:
           # Apply patch with fallback for minor context mismatches (e.g., fdinfo.c)
           patch -p1 --forward --batch < SUSFS/kernel_patches/50_add_susfs_in_kernel-4.14.patch || true
 
-          # Resolve any failed rejected hunks automatically using Python
+          # Resolve any failed rejected hunks and add missing ABI stubs automatically
           python3 <<'PY'
           import os
           import re
@@ -639,6 +639,23 @@ jobs:
           for orig in root.glob("**/*.orig"):
               orig.unlink()
 
+          # Inject susfs_extra_works stub if missing to satisfy KernelSU-Next ABI requirement
+          susfs_h = Path("include/linux/susfs.h")
+          susfs_c = Path("fs/susfs.c")
+
+          if susfs_h.exists():
+              text_h = susfs_h.read_text()
+              if "susfs_extra_works" not in text_h:
+                  text_h += "\nextern void susfs_extra_works(void);\n"
+                  susfs_h.write_text(text_h)
+                  print("[ABI FIX] Added susfs_extra_works declaration to include/linux/susfs.h")
+
+          if susfs_c.exists():
+              text_c = susfs_c.read_text()
+              if "susfs_extra_works" not in text_c:
+                  text_c += "\nvoid susfs_extra_works(void) {}\n"
+                  susfs_c.write_text(text_c)
+                  print("[ABI FIX] Added susfs_extra_works stub definition to fs/susfs.c")
           PY
 
           test -f fs/susfs.c
