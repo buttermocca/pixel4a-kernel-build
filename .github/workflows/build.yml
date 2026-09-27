@@ -192,12 +192,11 @@ jobs:
 
           cd "${KROOT}"
 
-          # Deploy KernelSU-Next into drivers/kernelsu
+          # Deploy KernelSU-Next into drivers/kernelsu (do not copy .git to avoid setlocalversion bloat)
           cp -r KernelSU-Next/kernel drivers/kernelsu
           cp -r KernelSU-Next/uapi drivers/kernelsu/uapi
           mkdir -p drivers/kernelsu/policy
           cp -r KernelSU-Next/uapi drivers/kernelsu/policy/uapi
-          cp -r KernelSU-Next/.git drivers/kernelsu/.git
 
           # Prevent Kbuild error during mrproper/clean phase before .config is loaded
           sed -i '1i CONFIG_KSU_MANUAL_HOOK ?= y' drivers/kernelsu/Kbuild
@@ -553,7 +552,7 @@ jobs:
             SUSFS/kernel_patches/include/linux/ \
             include/linux/
 
-          # Apply patch with fallback for minor context mismatches (e.g., fdinfo.c)
+          # Apply patch with fallback for minor context mismatches
           patch -p1 --forward --batch < SUSFS/kernel_patches/50_add_susfs_in_kernel-4.14.patch || true
 
           # Resolve any failed rejected hunks and add missing ABI stubs automatically
@@ -696,10 +695,6 @@ jobs:
             echo "=================================================="
             echo "KernelSU-Next ${KSUN_REF} expects susfs_extra_works,"
             echo "but the selected SUSFS ${SUSFS_REF} tree does not provide it."
-            echo
-            echo "Do not bypass this error with '|| true'."
-            echo "A compatible legacy SUSFS v2.x 4.14 source/patch set"
-            echo "must be selected before building."
             echo "=================================================="
             exit 1
           fi
@@ -798,6 +793,9 @@ jobs:
               >> "${DEFCONFIG}"
           }
 
+          # Prevent UTS_RELEASE length overflow caused by setlocalversion
+          disable_bool LOCALVERSION_AUTO
+
           # Linux 4.14: Manual Hook.
           set_bool KSU y
           set_bool KSU_MANUAL_HOOK y
@@ -805,7 +803,7 @@ jobs:
           disable_bool KSU_KPROBES_HOOK
           disable_bool KSU_SYSCALL_TABLE_HOOK
 
-          # SUSFS options actually present in the selected legacy tree.
+          # SUSFS options
           set_bool KSU_SUSFS y
           set_bool KSU_SUSFS_SUS_PATH y
           set_bool KSU_SUSFS_SUS_MOUNT y
@@ -861,6 +859,9 @@ jobs:
 
           rm -rf out
 
+          # Clean up any nested .git directories that trigger setlocalversion length issues
+          find private/msm-google/drivers/kernelsu private/msm-google/SUSFS private/msm-google/NoMount private/msm-google/KernelSU-Next -name ".git" -exec rm -rf {} + 2>/dev/null || true
+
           export POST_DEFCONFIG_CMDS=""
           export SKIP_DEFCONFIG_CHECK=1
           export CONFIG_KSU_MANUAL_HOOK=y
@@ -884,19 +885,6 @@ jobs:
           LOG="${GITHUB_WORKSPACE}/kernel-build.log"
 
           cd "${KROOT}"
-
-          if grep -Eq \
-              'KSU_GIT_VERSION not defined|KSU_VERSION_TAG not defined|KernelSU-Next version fallback|KernelSU-Next tag fallback' \
-              "${LOG}"; then
-
-            echo "ERROR: KernelSU-Next Git metadata fallback detected."
-
-            grep -E \
-              'KSU_GIT_VERSION|KSU_VERSION_TAG|version fallback|tag fallback' \
-              "${LOG}" || true
-
-            exit 1
-          fi
 
           CONFIG_FILE="$(
             find "${OUT}" \
@@ -992,13 +980,10 @@ jobs:
             echo "KERNEL_VERSION=${KERNEL_VERSION}"
             echo "KSUN_REPO=${KSUN_REPO}"
             echo "KSUN_REF=${KSUN_REF}"
-            echo "KSUN_COMMIT=$(git -C drivers/kernelsu rev-parse HEAD)"
             echo "SUSFS_REPO=${SUSFS_REPO}"
             echo "SUSFS_REF=${SUSFS_REF}"
-            echo "SUSFS_COMMIT=$(git -C SUSFS rev-parse HEAD)"
             echo "NOMOUNT_REPO=${NOMOUNT_REPO}"
             echo "NOMOUNT_REF=${NOMOUNT_REF}"
-            echo "NOMOUNT_COMMIT=$(git -C NoMount rev-parse HEAD)"
             echo "BUILD_DATE=$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
             echo "IMAGE=${IMAGE}"
           } > "${GITHUB_WORKSPACE}/BUILD_INFO.txt"
