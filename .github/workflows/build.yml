@@ -192,14 +192,16 @@ jobs:
 
           cd "${KROOT}"
 
-          # Deploy KernelSU-Next into drivers/kernelsu (do not copy .git to avoid setlocalversion bloat)
+          # Deploy KernelSU-Next into drivers/kernelsu
           cp -r KernelSU-Next/kernel drivers/kernelsu
           cp -r KernelSU-Next/uapi drivers/kernelsu/uapi
           mkdir -p drivers/kernelsu/policy
           cp -r KernelSU-Next/uapi drivers/kernelsu/policy/uapi
 
-          # Prevent Kbuild error during mrproper/clean phase before .config is loaded
-          sed -i '1i CONFIG_KSU_MANUAL_HOOK ?= y' drivers/kernelsu/Kbuild
+          # make mrproper 및 Kbuild 평가 시 자동 패처가 동작하지 않도록 변수 강제 대입 (:=)
+          sed -i '1i CONFIG_KSU_MANUAL_HOOK := y' drivers/kernelsu/Kbuild
+          sed -i '1i KSU_GIT_VERSION := d999a2aff11575c6e2f520129ecffb7c6058fb02' drivers/kernelsu/Kbuild
+          sed -i '1i KSU_VERSION_TAG := v3.4.0-legacy-susfs-v2' drivers/kernelsu/Kbuild
 
           test -d drivers/kernelsu
           test -f drivers/kernelsu/Kbuild
@@ -552,7 +554,7 @@ jobs:
             SUSFS/kernel_patches/include/linux/ \
             include/linux/
 
-          # Apply patch cleanly without dangerous fuzzy rej resolution
+          # Clean patch application without dangerous rej file resolution
           patch -p1 --forward --batch < SUSFS/kernel_patches/50_add_susfs_in_kernel-4.14.patch || true
 
           # Clean up any rej or orig files
