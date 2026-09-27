@@ -205,6 +205,27 @@ jobs:
           find drivers/kernelsu -type f -name "*.py" -exec bash -c 'echo "import sys; sys.exit(0)" > "$1"' _ {} \;
 
           # 3. drivers/kernelsu/Kbuild 정적화 및 파이썬 호출 구문 제거
+          #
+          # 주의: 아래 두 가지 문제를 반드시 함께 처리해야 한다.
+          #  (a) 라인 단위로 ".py"/"python" 문자열만 보고 주석 처리하면,
+          #      원본 Kbuild에 백슬래시(\)로 이어지는 멀티라인 셸 명령이
+          #      있을 경우 이어지는 다음 줄이 "고아 라인"으로 남아
+          #      make 파싱 단계에서 문법 오류(missing separator 등)를
+          #      일으킬 수 있다. -> 연속되는 줄까지 함께 주석 처리한다.
+          #  (b) KernelSU-Next의 Kbuild는 KSU_GIT_VERSION/KSU_VERSION_TAG를
+          #      "drivers/kernelsu가 git 저장소(서브모듈)인 경우"에만
+          #      git 명령으로 자체 계산하고, 그렇지 않으면 경고를 찍고
+          #      하드코딩된 fallback 값을 쓰도록 되어 있다. 이 워크플로는
+          #      KernelSU-Next를 `git clone` 후 `cp -r`로 kernel/ 폴더만
+          #      복사하므로 drivers/kernelsu는 애초에 .git이 없고, 항상
+          #      fallback 분기를 탄다. 즉 헤더에 단순히
+          #      "KSU_GIT_VERSION := ..." 를 넣어도, 파일 뒷부분의
+          #      ifeq(...)/else 블록이 같은 변수를 다시 대입하면서
+          #      그 값을 덮어써 버린다 (err7.txt 로그의
+          #      "KSU_GIT_VERSION not defined!" / "tag: v0.0.1" 경고가
+          #      바로 이 증상이다). 이를 막으려면 make의 `override`
+          #      지시자를 사용해 이후의 일반 대입이 값을 덮어쓰지
+          #      못하게 고정해야 한다.
           python3 <<'PY'
           from pathlib import Path
 
@@ -212,17 +233,28 @@ jobs:
           if kbuild_path.exists():
               lines = kbuild_path.read_text().splitlines()
               sanitized = []
+              in_continuation = False
               for line in lines:
-                  # 파이썬 스크립트 호출 또는 .py 참조 행 완전 주석 처리
-                  if ".py" in line or "python" in line.lower():
+                  is_py_ref = ".py" in line or "python" in line.lower()
+
+                  if in_continuation:
+                      # 이전 줄이 backslash로 이어졌으므로 이 줄도 같은
+                      # 논리적 명령의 일부다. 계속 주석 처리한다.
                       sanitized.append(f"# SANITIZED: {line}")
+                      in_continuation = line.rstrip().endswith("\\")
+                      continue
+
+                  if is_py_ref:
+                      sanitized.append(f"# SANITIZED: {line}")
+                      in_continuation = line.rstrip().endswith("\\")
                   else:
                       sanitized.append(line)
+                      in_continuation = False
 
               header = [
-                  "CONFIG_KSU_MANUAL_HOOK := y",
-                  "KSU_GIT_VERSION := d999a2aff11575c6e2f520129ecffb7c6058fb02",
-                  "KSU_VERSION_TAG := v3.4.0-legacy-susfs-v2",
+                  "override CONFIG_KSU_MANUAL_HOOK := y",
+                  "override KSU_GIT_VERSION := d999a2aff11575c6e2f520129ecffb7c6058fb02",
+                  "override KSU_VERSION_TAG := v3.4.0-legacy-susfs-v2",
               ]
 
               kbuild_path.write_text("\n".join(header + sanitized) + "\n")
@@ -810,10 +842,35 @@ jobs:
 
           set -o pipefail
 
+          # V=1: kbuild가 실패한 실제 명령/에러 줄을 그대로 출력하게 강제한다.
+          # 이게 없으면 하위 make가 실패해도 상위에서는
+          # "make[N]: *** [Makefile:NNNN: drivers] Error 2" 같은
+          # 요약 메시지만 보이고, 정작 원인이 된 컴파일러/Kbuild 진단은
+          # 로그에서 사라진 것처럼 보일 수 있다 (err7.txt가 그 경우).
+          set +e
           LTO=thin \
           BUILD_CONFIG=private/msm-google/build.config.sunfish.custom \
+          V=1 \
           ./build/build.sh \
             2>&1 | tee "${GITHUB_WORKSPACE}/kernel-build.log"
+          BUILD_STATUS="${PIPESTATUS[0]}"
+          set -e
+
+          if [ "${BUILD_STATUS}" -ne 0 ]; then
+            echo
+            echo "=================================================="
+            echo "빌드 실패. 실제 원인으로 추정되는 로그 구간 (자동 추출):"
+            echo "=================================================="
+            grep -n -iE \
+              "error:|error [0-9]+|missing separator|no rule to make target|undefined reference|multiple definition|fatal error|No such file or directory" \
+              "${GITHUB_WORKSPACE}/kernel-build.log" \
+              | tail -n 60 || true
+            echo "=================================================="
+            echo "위 구간이 비어 있다면 kernel-build.log 전체를"
+            echo "'빌드 진단정보 업로드' 아티팩트에서 직접 확인할 것."
+            echo "=================================================="
+            exit "${BUILD_STATUS}"
+          fi
 
       - name: 빌드 결과 검증
         shell: bash
