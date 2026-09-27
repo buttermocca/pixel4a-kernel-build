@@ -12,6 +12,8 @@ env:
   # Pinned KernelSU-Next legacy SUSFS tree.
   KSUN_REPO: https://github.com/sidex15/KernelSU-Next.git
   KSUN_REF: d999a2aff11575c6e2f520129ecffb7c6058fb02
+  KSU_GIT_VERSION: d999a2aff11575c6e2f520129ecffb7c6058fb02
+  KSU_VERSION_TAG: v3.4.0-legacy-susfs-v2
 
   # SUSFS Linux 4.14 patch tree.
   SUSFS_REPO: https://gitlab.com/simonpunk/susfs4ksu.git
@@ -41,7 +43,7 @@ jobs:
           remove-android: true
           remove-haskell: true
 
-      - name: 필수 패키지 설치
+      - name: 필수 패키지 설치 및 Git 환경 설정
         shell: bash
         run: |
           set -euo pipefail
@@ -70,6 +72,9 @@ jobs:
             rsync \
             unzip \
             zip
+
+          # Bypass Git safe.directory check for repo and submodules in CI
+          git config --global --add safe.directory "*"
 
           gcc --version | head -n 1
           clang --version | head -n 1
@@ -859,6 +864,8 @@ jobs:
           export POST_DEFCONFIG_CMDS=""
           export SKIP_DEFCONFIG_CHECK=1
           export CONFIG_KSU_MANUAL_HOOK=y
+          export KSU_GIT_VERSION="${KSUN_REF}"
+          export KSU_VERSION_TAG="v3.4.0-legacy-susfs-v2"
 
           set -o pipefail
 
