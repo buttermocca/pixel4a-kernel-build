@@ -1,62 +1,165 @@
-name: Build Pixel 4a Sunfish Kernel
+name: Build Pixel 4a Sunfish Kernel (KernelSU-Next + SUSFS + NoMount + BBR)
+
+# ============================================================================
+# 대상: Google Pixel 4a (sunfish), TQ3A.230805.001.S1 (Android 13, 순정 커널
+#       4.14.302-g6ff6ddc33f7d)
+#
+# 이 워크플로가 만드는 것:
+#   - AOSP msm-google 4.14 (sunfish) 순정 소스
+#   - KernelSU-Next (legacy-susfs-v2 계열, 커밋 고정)
+#   - SUSFS 4.14 v2.2.1 (KernelSU-Next legacy-susfs-v2 API와 짝이 맞는 포팅본)
+#   - NoMount (내장)
+#   - BBR (기본 TCP 혼잡 제어)
+#   - AnyKernel3 플래셔블 zip
+#
+# ----------------------------------------------------------------------------
+# 이전 버전에서 실제로 실패했던 원인 (logs_98353932107.zip 분석 결과)
+# ----------------------------------------------------------------------------
+# [치명] 8단계(SUSFS 통합)에서 즉시 중단:
+#     Cloning into 'SUSFS'...
+#     fatal: '--detach' cannot be used with '-b/-B/--orphan'
+#     Process completed with exit code 128.
+#
+#   원인: `git clone <repo> SUSFS` 직후에는 `kernel-4.14` 라는 "원격 브랜치"만
+#   있고 로컬 브랜치는 없다. 이 상태에서 `git checkout --detach kernel-4.14`
+#   를 실행하면 git의 DWIM이 "로컬 브랜치 커널-4.14를 만들어 추적하게 한다"는
+#   동작(= -b)을 끼워 넣는데, --detach와 -b는 동시에 쓸 수 없어 즉시 죽는다.
+#   (SHA를 넣으면 -b가 필요 없으므로 통과한다. 그래서 KSUN 단계는 우연히
+#    성공하고 SUSFS 단계만 죽었다.)
+#   해결: ref를 먼저 "커밋 SHA로 확정"한 뒤 --detach 한다.
+#   아래 resolve_ref() 함수가 그 역할을 하며, 브랜치/태그/짧은 SHA 모두 지원한다.
+#
+# [치명] 그 다음에 기다리고 있던 진짜 문제: SUSFS API 불일치
+#   이 워크플로가 받아오던 SUSFS는 simonpunk/susfs4ksu의 kernel-4.14
+#   브랜치인데, 이 브랜치는 2025-02-23(v1.5.5) 이후 갱신이 없고 API가
+#   "struct st_susfs_* __user" 형태의 v1.x 계열이다.
+#   반면 KSUN legacy-susfs-v2(v3.4.0)는 v2.x API를 호출한다.
+#   실제로 두 트리를 대조하면 KSUN이 호출하는 34개 심볼 중 20개가
+#   공식 kernel-4.14 트리에 아예 존재하지 않는다
+#   (susfs_set_current_proc_umounted, susfs_is_current_proc_umounted,
+#    susfs_run_sus_path_loop, susfs_show_version, susfs_get_enabled_features,
+#    susfs_set_avc_log_spoofing ... ).
+#   게다가 기존 워크플로의 "ABI FIX" 스텁은 타입 충돌까지 유발한다:
+#   KSUN은 `extern struct work_struct susfs_extra_works;` 로 "변수"를
+#   선언하고 `schedule_work(&susfs_extra_works)` 로 쓰는데, 스텁은 같은
+#   이름을 `void susfs_extra_works(void) {}` 라는 "함수"로 정의한다.
+#   → 선언 불일치 컴파일 에러. 즉 스텁으로는 절대 통과할 수 없다.
+#   해결: API가 실증적으로 맞는 4.14용 SUSFS v2.2.1 포팅 패치를 사용한다.
+#   (저장소에 동봉한 susfs-4.14-v2.2.1.patch / 없으면 자동 생성)
+#
+# [수정] ABI 사전검사(9단계)가 사실상 항상 실패하던 문제
+#   기존 구현은 `--exclude-dir=kernelsu` 로 KSUN 자기 트리를 통째로 제외한 뒤
+#   나머지 커널에서만 심볼을 찾았다. 그런데 SUSFS가 KSUN과 공유하는 SID 관련
+#   헬퍼(susfs_is_sid_equal, susfs_get_current_sid, susfs_set_zygote_sid,
+#   susfs_set_ksu_sid, susfs_set_init_sid, susfs_set_priv_app_sid ...)는
+#   정의 위치가 바로 그 제외된 `drivers/kernelsu/selinux/selinux.c` 다.
+#   → 정상적으로 통합된 트리에서도 "누락"으로 오탐되어 빌드를 막는다.
+#   해결: 자기 트리에서 정의된 심볼을 먼저 인정하고, 실제로 외부(SUSFS)가
+#   제공해야 하는 심볼만 검사한다.
+#
+# [수정] 커널 소스 브랜치
+#   기존 기본값 android-msm-sunfish-4.14-android13 은 4.14.276 이다.
+#   TQ3A.230805.001.S1 순정(4.14.302-g6ff6ddc33f7d)과 맞추려면
+#   android-msm-sunfish-4.14-android13-qpr3 를 써야 한다(기본값 변경).
+#
+# [수정] defconfig 검증
+#   기존 구현은 Kconfig에 존재하지 않는 심볼까지 defconfig에 밀어 넣고
+#   그 결과를 검증했다. 이제 KSUN Kconfig에 실제로 있는 키만 적용하고,
+#   결과 .config 검증도 Kconfig에서 키를 읽어 자동 생성한다.
+# ============================================================================
 
 on:
   workflow_dispatch:
     inputs:
+      kernel_branch:
+        description: >-
+          AOSP manifest 브랜치. TQ3A.230805.001.S1 순정(4.14.302)과 맞추려면
+          android-msm-sunfish-4.14-android13-qpr3.
+        required: false
+        default: android-msm-sunfish-4.14-android13-qpr3
+
+      ksun_repo:
+        description: KernelSU-Next 저장소 URL
+        required: false
+        default: https://github.com/sidex15/KernelSU-Next.git
       ksun_ref:
         description: >-
-          KernelSU-Next 커밋(전체 SHA). 이 값과 susfs_ref가 서로 다른
-          시점의 API를 기대하면 9단계(ABI 사전검사)에서 실패한다.
+          KernelSU-Next 커밋 SHA/태그/브랜치. 기본값은 legacy-susfs-v2 계열의
+          v3.4.0-legacy-susfs-v2 태그 커밋(= 최신 legacy 트리).
+          SUSFS 포트가 실제로 컴파일 검증된 조합은
+          https://github.com/i928/KSU-Next.git @
+          f8e16580ee08f9eb1666e51f13a75bf5b7f5053f 이다.
+          (두 커밋이 호출하는 susfs_* 심볼 집합은 동일함을 확인했다.)
         required: false
         default: d999a2aff11575c6e2f520129ecffb7c6058fb02
       ksu_version_tag:
-        description: KSU_VERSION_TAG (ksun_ref와 짝이 맞는 태그 문자열)
+        description: 커널에 새길 KSU_VERSION_TAG 문자열
         required: false
         default: v3.4.0-legacy-susfs-v2
-      susfs_repo:
+      ksu_version_override:
         description: >-
-          SUSFS 저장소 URL. kernel-4.14 브랜치가 ksun_ref와 계속
-          어긋나면 대체 포크(예: 특정 fork의 legacy 브랜치)로 바꿔서
-          재시도해볼 수 있다.
+          (선택) KSU_VERSION 숫자 강제 지정. 비워두면 Kbuild가 커밋 수로
+          자동 계산한다. Manager가 "unsupported version"을 띄우면
+          Manager가 요구하는 versionCode 값을 넣어 재빌드할 것.
         required: false
-        default: https://gitlab.com/simonpunk/susfs4ksu.git
-      susfs_ref:
+        default: ""
+
+      susfs_patch_url:
         description: >-
-          SUSFS 브랜치명 또는 커밋 SHA. 브랜치명("kernel-4.14")은
-          흘러가는 참조라 오늘 성공해도 내일 다시 깨질 수 있으니,
-          한 번 호환 커밋을 찾으면 그 커밋 SHA로 고정할 것.
+          (선택) SUSFS 4.14 v2.2.1 패치를 직접 지정할 때의 URL.
+          비워두면 저장소의 .github/patches/susfs-4.14-v2.2.1.patch 를 쓰고,
+          그것도 없으면 유지보수 트리에서 자동 생성한다.
         required: false
-        default: kernel-4.14
+        default: ""
+      susfs_base:
+        description: SUSFS 자동 생성 시 기준 커밋(이 커밋 이후의 변경분을 뽑는다)
+        required: false
+        default: 6e1dbe34f3f1fec5205820865a61d9a8cc123985
+      susfs_tip:
+        description: SUSFS 자동 생성 시 대상 커밋(sunfish-susfs-v2.2.1 계열)
+        required: false
+        default: cd27fc627509c15221877bec19cb7d9b9b00188c
+
+      nomount_repo:
+        description: NoMount 저장소 URL
+        required: false
+        default: https://github.com/maxsteeel/nomount.git
+      nomount_ref:
+        description: NoMount 브랜치/태그/커밋
+        required: false
+        default: master
+      anykernel3_repo:
+        description: AnyKernel3 저장소 URL
+        required: false
+        default: https://github.com/osm0sis/AnyKernel3.git
+      anykernel3_ref:
+        description: AnyKernel3 브랜치/태그/커밋
+        required: false
+        default: master
 
 permissions:
   contents: read
 
 env:
-  KERNEL_BRANCH: android-msm-sunfish-4.14-android13
+  KERNEL_BRANCH: ${{ github.event.inputs.kernel_branch || 'android-msm-sunfish-4.14-android13-qpr3' }}
 
-  # Pinned KernelSU-Next legacy SUSFS tree.
-  # workflow_dispatch 입력이 있으면 그 값을, 없으면(예: 다른 트리거) 기본값을 쓴다.
-  KSUN_REPO: https://github.com/sidex15/KernelSU-Next.git
+  KSUN_REPO: ${{ github.event.inputs.ksun_repo || 'https://github.com/sidex15/KernelSU-Next.git' }}
   KSUN_REF: ${{ github.event.inputs.ksun_ref || 'd999a2aff11575c6e2f520129ecffb7c6058fb02' }}
-  KSU_GIT_VERSION: ${{ github.event.inputs.ksun_ref || 'd999a2aff11575c6e2f520129ecffb7c6058fb02' }}
   KSU_VERSION_TAG: ${{ github.event.inputs.ksu_version_tag || 'v3.4.0-legacy-susfs-v2' }}
+  KSU_VERSION_OVERRIDE: ${{ github.event.inputs.ksu_version_override || '' }}
 
-  # SUSFS Linux 4.14 patch tree.
-  # SUSFS_REF는 브랜치명뿐 아니라 임의의 커밋 SHA도 받을 수 있도록
-  # 아래 "SUSFS 4.14 통합" 단계에서 --depth=1 shallow clone 대신
-  # 전체 히스토리를 받아온 뒤 checkout한다 (자세한 이유는 해당 단계 주석 참고).
-  SUSFS_REPO: ${{ github.event.inputs.susfs_repo || 'https://gitlab.com/simonpunk/susfs4ksu.git' }}
-  SUSFS_REF: ${{ github.event.inputs.susfs_ref || 'kernel-4.14' }}
+  SUSFS_PATCH_URL: ${{ github.event.inputs.susfs_patch_url || '' }}
+  SUSFS_BASE: ${{ github.event.inputs.susfs_base || '6e1dbe34f3f1fec5205820865a61d9a8cc123985' }}
+  SUSFS_TIP: ${{ github.event.inputs.susfs_tip || 'cd27fc627509c15221877bec19cb7d9b9b00188c' }}
+  SUSFS_TIP_REPO: https://github.com/i928/kernel_google_msm-4.14.git
 
-  # NoMount legacy built-in integration.
-  NOMOUNT_REPO: https://github.com/maxsteeel/nomount.git
-  NOMOUNT_REF: master
+  NOMOUNT_REPO: ${{ github.event.inputs.nomount_repo || 'https://github.com/maxsteeel/nomount.git' }}
+  NOMOUNT_REF: ${{ github.event.inputs.nomount_ref || 'master' }}
 
-  ANYKERNEL3_REPO: https://github.com/osm0sis/AnyKernel3.git
-  ANYKERNEL3_REF: master
+  ANYKERNEL3_REPO: ${{ github.event.inputs.anykernel3_repo || 'https://github.com/osm0sis/AnyKernel3.git' }}
+  ANYKERNEL3_REF: ${{ github.event.inputs.anykernel3_ref || 'master' }}
 
-  # Fix Kbuild check during make mrproper/clean phase
-  CONFIG_KSU_MANUAL_HOOK: "y"
+  KROOT_NAME: private/msm-google
 
 jobs:
   build:
@@ -102,7 +205,7 @@ jobs:
             unzip \
             zip
 
-          # Bypass Git safe.directory check for repo and submodules in CI
+          # repo/submodule이 다른 소유자로 체크아웃돼도 git이 거부하지 않게 한다.
           git config --global --add safe.directory "*"
 
           gcc --version | head -n 1
@@ -116,7 +219,6 @@ jobs:
           set -euo pipefail
 
           REPO_DIR="${HOME}/bin"
-
           mkdir -p "${REPO_DIR}"
 
           curl \
@@ -129,11 +231,7 @@ jobs:
             -o "${REPO_DIR}/repo"
 
           chmod 0755 "${REPO_DIR}/repo"
-
-          # Persist for later workflow steps.
           echo "${REPO_DIR}" >> "${GITHUB_PATH}"
-
-          # Also make it available immediately in this shell.
           export PATH="${REPO_DIR}:${PATH}"
 
           command -v repo
@@ -148,7 +246,6 @@ jobs:
 
           rm -rf "${GITHUB_WORKSPACE}/kernel_workspace"
           mkdir -p "${GITHUB_WORKSPACE}/kernel_workspace"
-
           cd "${GITHUB_WORKSPACE}/kernel_workspace"
 
           repo init \
@@ -162,11 +259,13 @@ jobs:
             --no-tags \
             --no-clone-bundle
 
-          cd private/msm-google
+          cd "${KROOT_NAME}"
 
+          # 순정 커널과 같은 계열인지 확인한다.
+          # (TQ3A.230805.001.S1 순정: 4.14.302-g6ff6ddc33f7d)
           KERNEL_VERSION="$(make -s kernelversion)"
-
           echo "Kernel version: ${KERNEL_VERSION}"
+          echo "KERNEL_VERSION=${KERNEL_VERSION}" >> "${GITHUB_ENV}"
 
           case "${KERNEL_VERSION}" in
             4.14.*)
@@ -178,141 +277,94 @@ jobs:
               ;;
           esac
 
-      - name: KernelSU-Next 통합 및 파이썬 패처 완전 무력화
+      - name: KernelSU-Next 통합
         shell: bash
         run: |
           set -euo pipefail
 
-          KROOT="${GITHUB_WORKSPACE}/kernel_workspace/private/msm-google"
-
+          KROOT="${GITHUB_WORKSPACE}/kernel_workspace/${KROOT_NAME}"
           cd "${KROOT}"
+
+          # ------------------------------------------------------------------
+          # 브랜치/태그/짧은SHA를 "확정된 커밋 SHA"로 바꿔주는 헬퍼.
+          # 예전 코드의 `git checkout --detach <브랜치명>` 은 git DWIM이
+          # -b 를 끼워 넣어 즉시 fatal 로 죽는다(이번 실패의 직접 원인).
+          # ------------------------------------------------------------------
+          resolve_ref() {
+            local repo_dir="$1"
+            local ref="$2"
+            local out
+            if out="$(git -C "${repo_dir}" rev-parse --verify "refs/remotes/origin/${ref}^{commit}" 2>/dev/null)"; then
+              echo "${out}"; return 0
+            fi
+            if out="$(git -C "${repo_dir}" rev-parse --verify "refs/tags/${ref}^{commit}" 2>/dev/null)"; then
+              echo "${out}"; return 0
+            fi
+            if out="$(git -C "${repo_dir}" rev-parse --verify "${ref}^{commit}" 2>/dev/null)"; then
+              echo "${out}"; return 0
+            fi
+            echo "ERROR: ref '${ref}' 를 ${repo_dir} 에서 확인할 수 없습니다." >&2
+            return 1
+          }
 
           rm -rf drivers/kernelsu KernelSU-Next
 
           echo "KernelSU-Next repository: ${KSUN_REPO}"
-          echo "KernelSU-Next commit:     ${KSUN_REF}"
+          echo "KernelSU-Next ref:        ${KSUN_REF}"
 
-          git clone \
-            --filter=blob:none \
-            "${KSUN_REPO}" \
-            KernelSU-Next
+          # --filter=blob:none: 커밋 히스토리는 전부 받아온다.
+          # 이게 중요하다. KSUN Kbuild는 커밋 수(rev-list --count)로
+          # KSU_VERSION을 계산하기 때문에 shallow clone이면 버전이 깨진다.
+          git clone --filter=blob:none "${KSUN_REPO}" KernelSU-Next
 
-          cd KernelSU-Next
+          KSUN_COMMIT="$(resolve_ref KernelSU-Next "${KSUN_REF}")"
+          git -C KernelSU-Next checkout --detach "${KSUN_COMMIT}"
 
-          git checkout --detach "${KSUN_REF}"
-
-          KSUN_COMMIT="$(git rev-parse HEAD)"
-          KSUN_COMMIT_DATE="$(git show -s --format=%ci HEAD)"
-
-          test "${KSUN_COMMIT}" = "${KSUN_REF}"
-
+          KSUN_COMMIT_DATE="$(git -C KernelSU-Next show -s --format=%ci HEAD)"
           echo "KernelSU-Next HEAD:        ${KSUN_COMMIT}"
           echo "KernelSU-Next commit date: ${KSUN_COMMIT_DATE}"
-          # 이 값을 9단계(ABI 사전검사)에서 다시 출력하는 SUSFS 커밋
-          # 일자와 나란히 비교하면, 두 트리의 "시점"이 서로 얼마나
-          # 떨어져 있는지 감을 잡는 데 도움이 된다. 완벽한 증거는
-          # 아니지만(브랜치가 항상 시간 순으로 기능을 추가하는 건
-          # 아니므로), 최소한 "SUSFS 쪽이 몇 달 더 오래된 스냅샷"
-          # 같은 명백한 어긋남은 바로 눈에 띈다.
+
+          echo "KSUN_COMMIT=${KSUN_COMMIT}" >> "${GITHUB_ENV}"
           echo "${KSUN_COMMIT_DATE}" > "${GITHUB_WORKSPACE}/ksun_commit_date.txt"
+          echo "${KSUN_COMMIT}"      > "${GITHUB_WORKSPACE}/ksun_commit.txt"
 
-          # Verify the actual source layout in KernelSU-Next
-          test -f kernel/Kbuild
-          test -f kernel/Kconfig
-          test -f kernel/core/init.c
-          test -f kernel/policy/allowlist.h
-          test -f kernel/policy/app_profile.h
-          test -f uapi/app_profile.h
+          # 소스 레이아웃 검증 (legacy-susfs-v2 트리 = kernel/ 하위 구조)
+          test -f KernelSU-Next/kernel/Kbuild
+          test -f KernelSU-Next/kernel/Kconfig
+          test -f KernelSU-Next/kernel/core/init.c
+          test -f KernelSU-Next/kernel/policy/allowlist.h
+          test -f KernelSU-Next/kernel/policy/app_profile.h
+          test -f KernelSU-Next/uapi/app_profile.h
 
-          # Verify manual hook and SUSFS symbols
-          grep -Fq 'config KSU_MANUAL_HOOK' kernel/Kconfig
-          grep -Fq 'config KSU_SUSFS' kernel/Kconfig
+          grep -Fq 'config KSU_MANUAL_HOOK' KernelSU-Next/kernel/Kconfig
+          grep -Fq 'config KSU_SUSFS'      KernelSU-Next/kernel/Kconfig
 
-          cd "${KROOT}"
+          # Kbuild에 파이썬 패처가 남아 있으면 여기서 명시적으로 실패시킨다.
+          # (예전 워크플로는 .py를 전부 무력화하고 Kbuild를 주석 처리했는데,
+          #  이 트리에는 애초에 파이썬 호출이 없다. 조용히 갈아엎는 대신
+          #  전제가 깨졌다면 그대로 알려주는 편이 안전하다.)
+          if grep -qE '(^|[^A-Za-z0-9_])python[0-9.]*([^A-Za-z0-9_]|$)|\.py([^A-Za-z0-9_]|$)' KernelSU-Next/kernel/Kbuild; then
+            echo "ERROR: KernelSU-Next Kbuild에 파이썬 호출이 남아 있습니다."
+            echo "       이 워크플로는 파이썬 패처가 없는 트리를 전제로 합니다."
+            grep -nE '(^|[^A-Za-z0-9_])python[0-9.]*([^A-Za-z0-9_]|$)|\.py([^A-Za-z0-9_]|$)' KernelSU-Next/kernel/Kbuild || true
+            exit 1
+          fi
 
-          # Deploy KernelSU-Next into drivers/kernelsu
-          cp -r KernelSU-Next/kernel drivers/kernelsu
-          cp -r KernelSU-Next/uapi drivers/kernelsu/uapi
-          mkdir -p drivers/kernelsu/policy
-          cp -r KernelSU-Next/uapi drivers/kernelsu/policy/uapi
+          # drivers/kernelsu 는 KernelSU-Next/kernel 로의 상대 심볼릭 링크로 둔다.
+          # (복사 + .git 삭제 방식은 KSU_VERSION 자동 계산을 망가뜨린다.)
+          ln -sfn ../KernelSU-Next/kernel drivers/kernelsu
 
-          # 1. KernelSU-Next 원본 폴더 제거 (Kbuild가 원본 파이썬 스크립트를 참조하지 못하도록 차단)
-          rm -rf KernelSU-Next
-
-          # 2. drivers/kernelsu 내부의 모든 .py 스크립트 무력화
-          find drivers/kernelsu -type f -name "*.py" -exec bash -c 'echo "import sys; sys.exit(0)" > "$1"' _ {} \;
-
-          # 3. drivers/kernelsu/Kbuild 정적화 및 파이썬 호출 구문 제거
-          #
-          # 주의: 아래 두 가지 문제를 반드시 함께 처리해야 한다.
-          #  (a) 라인 단위로 ".py"/"python" 문자열만 보고 주석 처리하면,
-          #      원본 Kbuild에 백슬래시(\)로 이어지는 멀티라인 셸 명령이
-          #      있을 경우 이어지는 다음 줄이 "고아 라인"으로 남아
-          #      make 파싱 단계에서 문법 오류(missing separator 등)를
-          #      일으킬 수 있다. -> 연속되는 줄까지 함께 주석 처리한다.
-          #  (b) KernelSU-Next의 Kbuild는 KSU_GIT_VERSION/KSU_VERSION_TAG를
-          #      "drivers/kernelsu가 git 저장소(서브모듈)인 경우"에만
-          #      git 명령으로 자체 계산하고, 그렇지 않으면 경고를 찍고
-          #      하드코딩된 fallback 값을 쓰도록 되어 있다. 이 워크플로는
-          #      KernelSU-Next를 `git clone` 후 `cp -r`로 kernel/ 폴더만
-          #      복사하므로 drivers/kernelsu는 애초에 .git이 없고, 항상
-          #      fallback 분기를 탄다. 즉 헤더에 단순히
-          #      "KSU_GIT_VERSION := ..." 를 넣어도, 파일 뒷부분의
-          #      ifeq(...)/else 블록이 같은 변수를 다시 대입하면서
-          #      그 값을 덮어써 버린다 (err7.txt 로그의
-          #      "KSU_GIT_VERSION not defined!" / "tag: v0.0.1" 경고가
-          #      바로 이 증상이다). 이를 막으려면 make의 `override`
-          #      지시자를 사용해 이후의 일반 대입이 값을 덮어쓰지
-          #      못하게 고정해야 한다.
-          python3 <<'PY'
-          import os
-          from pathlib import Path
-
-          kbuild_path = Path("drivers/kernelsu/Kbuild")
-          if kbuild_path.exists():
-              lines = kbuild_path.read_text().splitlines()
-              sanitized = []
-              in_continuation = False
-              for line in lines:
-                  is_py_ref = ".py" in line or "python" in line.lower()
-
-                  if in_continuation:
-                      # 이전 줄이 backslash로 이어졌으므로 이 줄도 같은
-                      # 논리적 명령의 일부다. 계속 주석 처리한다.
-                      sanitized.append(f"# SANITIZED: {line}")
-                      in_continuation = line.rstrip().endswith("\\")
-                      continue
-
-                  if is_py_ref:
-                      sanitized.append(f"# SANITIZED: {line}")
-                      in_continuation = line.rstrip().endswith("\\")
-                  else:
-                      sanitized.append(line)
-                      in_continuation = False
-
-              # 주의: 예전에는 아래 두 값이 문자열로 하드코딩되어 있었다.
-              # workflow_dispatch로 KSUN_REF/KSU_VERSION_TAG를 바꿔도
-              # 이 헤더가 옛날 값을 계속 박아 넣으면, 실제 체크아웃한
-              # 커밋과 커널에 새겨지는 버전 문자열이 어긋나 디버깅할 때
-              # 혼란을 준다. 워크플로 env로 내려온 실제 값을 읽는다.
-              ksu_git_version = os.environ["KSU_GIT_VERSION"]
-              ksu_version_tag = os.environ["KSU_VERSION_TAG"]
-
-              header = [
-                  "override CONFIG_KSU_MANUAL_HOOK := y",
-                  f"override KSU_GIT_VERSION := {ksu_git_version}",
-                  f"override KSU_VERSION_TAG := {ksu_version_tag}",
-              ]
-
-              kbuild_path.write_text("\n".join(header + sanitized) + "\n")
-              print("[OK] drivers/kernelsu/Kbuild sanitized successfully.")
-          PY
-
-          test -d drivers/kernelsu
-          test -f drivers/kernelsu/Kbuild
+          test -e drivers/kernelsu/Kbuild
           test -f drivers/kernelsu/Kconfig
           test -f drivers/kernelsu/uapi/app_profile.h
-          test -f drivers/kernelsu/policy/uapi/app_profile.h
+
+          # uapi/policy 경로도 KSUN 트리에서 그대로 보이도록 정리한다.
+          # (legacy-susfs-v2 는 kernel/uapi 를 그대로 쓰지만, 일부 패치는
+          #  drivers/kernelsu/policy/uapi 를 참조하므로 둘 다 보장한다.)
+          if [ ! -e drivers/kernelsu/policy/uapi ]; then
+            mkdir -p drivers/kernelsu/policy
+            ln -sfn ../../uapi drivers/kernelsu/policy/uapi
+          fi
 
           grep -Fqx \
             'obj-$(CONFIG_KSU) += kernelsu/' \
@@ -331,8 +383,10 @@ jobs:
         run: |
           set -euo pipefail
 
-          cd "${GITHUB_WORKSPACE}/kernel_workspace/private/msm-google"
+          cd "${GITHUB_WORKSPACE}/kernel_workspace/${KROOT_NAME}"
 
+          # 이 단계는 "SUSFS 통합" 다음이 아니라 "전"에 돌 수 있도록
+          # 심볼 존재 여부를 항상 확인하고, 이미 있으면 건너뛴다(idempotent).
           python3 <<'PY'
           from pathlib import Path
           import re
@@ -342,73 +396,37 @@ jobs:
 
           def add_after_includes(path: Path, block: str) -> None:
               text = path.read_text()
-
               if "ksu_handle_" in text:
                   return
-
-              matches = list(
-                  re.finditer(r"^#include[^\n]*$", text, re.MULTILINE)
-              )
-
+              matches = list(re.finditer(r"^#include[^\n]*$", text, re.MULTILINE))
               if not matches:
                   print(f"[ERROR] include block not found: {path}")
                   sys.exit(1)
-
               pos = matches[-1].end()
+              path.write_text(text[:pos] + "\n" + block + text[pos:])
 
-              path.write_text(
-                  text[:pos] + "\n" + block + text[pos:]
-              )
-
-          def insert_before_anchor(
-              path: Path,
-              function_pattern: str,
-              anchor_pattern: str,
-              block: str,
-              symbol: str,
-          ) -> None:
+          def insert_before_anchor(path, function_pattern, anchor_pattern, block, symbol):
               text = path.read_text()
-
               if symbol in text:
                   print(f"[OK] {path}: {symbol} already present")
                   return
-
               fn = re.search(function_pattern, text, re.MULTILINE | re.DOTALL)
-
               if not fn:
                   print(f"[ERROR] function not found: {path}")
                   sys.exit(1)
-
-              anchor = re.search(
-                  anchor_pattern,
-                  text[fn.end():],
-                  re.MULTILINE | re.DOTALL,
-              )
-
+              tail = text[fn.end():]
+              anchor = re.search(anchor_pattern, tail, re.MULTILINE | re.DOTALL)
               if not anchor:
-                  print(
-                      f"[ERROR] anchor not found for {symbol}: {path}"
-                  )
+                  print(f"[ERROR] anchor not found for {symbol}: {path}")
                   sys.exit(1)
-
               pos = fn.end() + anchor.start()
-
-              path.write_text(
-                  text[:pos] + block + "\n" + text[pos:]
-              )
-
+              path.write_text(text[:pos] + block + "\n" + text[pos:])
               if symbol not in path.read_text():
-                  print(
-                      f"[ERROR] insertion verification failed: "
-                      f"{path}: {symbol}"
-                  )
+                  print(f"[ERROR] insertion verification failed: {path}: {symbol}")
                   sys.exit(1)
-
               print(f"[PATCH] {path}: {symbol}")
 
-          # ============================================================
-          # fs/exec.c
-          # ============================================================
+          # fs/exec.c ------------------------------------------------------
           exec_decl = r'''
           #ifdef CONFIG_KSU
           extern int ksu_handle_execveat(
@@ -435,44 +453,26 @@ jobs:
           add_after_includes(exec_path, exec_decl)
 
           text = exec_path.read_text()
-
           for name in ("do_execve", "compat_do_execve"):
               fn = re.search(
                   rf"(?m)^[^\n]*\b{name}\s*\([^;]*\)\s*\{{",
-                  text,
-                  re.MULTILINE | re.DOTALL,
+                  text, re.MULTILINE | re.DOTALL,
               )
-
               if not fn:
                   print(f"[ERROR] {name}() not found in fs/exec.c")
                   sys.exit(1)
-
               tail = text[fn.end():]
-
-              anchor = re.search(
-                  r"return\s+do_execveat_common\s*\(",
-                  tail,
-                  re.MULTILINE,
-              )
-
+              anchor = re.search(r"return\s+do_execveat_common\s*\(", tail, re.MULTILINE)
               if not anchor:
-                  print(
-                      f"[ERROR] do_execveat_common() call not found "
-                      f"inside {name}()"
-                  )
+                  print(f"[ERROR] do_execveat_common() call not found inside {name}()")
                   sys.exit(1)
-
               section = tail[:anchor.start()]
-
               if "ksu_handle_execveat(" not in section:
                   pos = fn.end() + anchor.start()
                   text = text[:pos] + exec_block + "\n" + text[pos:]
-
           exec_path.write_text(text)
 
-          # ============================================================
-          # fs/open.c
-          # ============================================================
+          # fs/open.c ------------------------------------------------------
           open_decl = r'''
           #ifdef CONFIG_KSU
           extern int ksu_handle_faccessat(
@@ -482,17 +482,11 @@ jobs:
               int *flags);
           #endif
           '''
-
           open_block = r'''
           #ifdef CONFIG_KSU
-              ksu_handle_faccessat(
-                  &dfd,
-                  &filename,
-                  &mode,
-                  NULL);
+              ksu_handle_faccessat(&dfd, &filename, &mode, NULL);
           #endif
           '''
-
           open_path = ROOT / "fs/open.c"
           add_after_includes(open_path, open_decl)
           insert_before_anchor(
@@ -503,9 +497,7 @@ jobs:
               "ksu_handle_faccessat(",
           )
 
-          # ============================================================
-          # fs/read_write.c
-          # ============================================================
+          # fs/read_write.c ------------------------------------------------
           read_decl = r'''
           #ifdef CONFIG_KSU
           extern bool ksu_vfs_read_hook __read_mostly;
@@ -515,17 +507,12 @@ jobs:
               size_t *count_ptr);
           #endif
           '''
-
           read_block = r'''
           #ifdef CONFIG_KSU
               if (unlikely(ksu_vfs_read_hook))
-                  ksu_handle_sys_read(
-                      fd,
-                      &buf,
-                      &count);
+                  ksu_handle_sys_read(fd, &buf, &count);
           #endif
           '''
-
           read_path = ROOT / "fs/read_write.c"
           add_after_includes(read_path, read_decl)
           insert_before_anchor(
@@ -536,9 +523,7 @@ jobs:
               "ksu_handle_sys_read(",
           )
 
-          # ============================================================
-          # fs/stat.c
-          # ============================================================
+          # fs/stat.c ------------------------------------------------------
           stat_decl = r'''
           #ifdef CONFIG_KSU
           extern int ksu_handle_stat(
@@ -547,16 +532,11 @@ jobs:
               int *flags);
           #endif
           '''
-
           stat_block = r'''
           #ifdef CONFIG_KSU
-              ksu_handle_stat(
-                  &dfd,
-                  &filename,
-                  &flag);
+              ksu_handle_stat(&dfd, &filename, &flag);
           #endif
           '''
-
           stat_path = ROOT / "fs/stat.c"
           add_after_includes(stat_path, stat_decl)
           insert_before_anchor(
@@ -567,9 +547,7 @@ jobs:
               "ksu_handle_stat(",
           )
 
-          # ============================================================
-          # kernel/reboot.c
-          # ============================================================
+          # kernel/reboot.c ------------------------------------------------
           reboot_decl = r'''
           #ifdef CONFIG_KSU
           extern int ksu_handle_sys_reboot(
@@ -579,17 +557,11 @@ jobs:
               void __user **arg);
           #endif
           '''
-
           reboot_block = r'''
           #ifdef CONFIG_KSU
-              ksu_handle_sys_reboot(
-                  magic1,
-                  magic2,
-                  cmd,
-                  &arg);
+              ksu_handle_sys_reboot(magic1, magic2, cmd, &arg);
           #endif
           '''
-
           reboot_path = ROOT / "kernel/reboot.c"
           add_after_includes(reboot_path, reboot_decl)
           insert_before_anchor(
@@ -600,7 +572,6 @@ jobs:
               "ksu_handle_sys_reboot(",
           )
 
-          # Final source checks.
           required = {
               "fs/exec.c": ["ksu_handle_execveat("],
               "fs/open.c": ["ksu_handle_faccessat("],
@@ -608,162 +579,128 @@ jobs:
               "fs/stat.c": ["ksu_handle_stat("],
               "kernel/reboot.c": ["ksu_handle_sys_reboot("],
           }
-
           for filename, symbols in required.items():
               text = (ROOT / filename).read_text()
               for symbol in symbols:
                   if symbol not in text:
-                      print(
-                          f"[ERROR] Manual hook missing: "
-                          f"{filename}: {symbol}"
-                      )
+                      print(f"[ERROR] Manual hook missing: {filename}: {symbol}")
                       sys.exit(1)
 
           print("KernelSU-Next manual hook integration OK.")
           PY
 
-      - name: SUSFS 4.14 통합
+      - name: SUSFS 4.14 (KernelSU-Next legacy-susfs-v2 호환 포트) 통합
         shell: bash
         run: |
           set -euo pipefail
 
-          KROOT="${GITHUB_WORKSPACE}/kernel_workspace/private/msm-google"
+          KROOT="${GITHUB_WORKSPACE}/kernel_workspace/${KROOT_NAME}"
+          PATCH_LOCAL="${GITHUB_WORKSPACE}/.github/patches/susfs-4.14-v2.2.1.patch"
+          PATCH_WORK="${GITHUB_WORKSPACE}/susfs-4.14-v2.2.1.patch"
 
-          cd "${KROOT}"
+          # 1) 어떤 패치를 쓸지 결정: URL > 저장소 동봉 > 유지보수 트리에서 생성
+          if [ -n "${SUSFS_PATCH_URL}" ]; then
+            echo "SUSFS patch source: URL (${SUSFS_PATCH_URL})"
+            curl --fail --location --retry 5 --retry-all-errors \
+              "${SUSFS_PATCH_URL}" -o "${PATCH_WORK}"
+          elif [ -f "${PATCH_LOCAL}" ]; then
+            echo "SUSFS patch source: repository file (.github/patches/susfs-4.14-v2.2.1.patch)"
+            cp "${PATCH_LOCAL}" "${PATCH_WORK}"
+          else
+            echo "SUSFS patch source: generated from ${SUSFS_TIP_REPO}"
+            rm -rf /tmp/susfs-src
+            git clone --filter=blob:none --no-checkout \
+              "${SUSFS_TIP_REPO}" /tmp/susfs-src
+            git -C /tmp/susfs-src diff \
+              "${SUSFS_BASE}..${SUSFS_TIP}" \
+              -- \
+              'fs/*' \
+              'include/linux/*' \
+              'kernel/sys.c' \
+              'kernel/kallsyms.c' \
+              'mm/memory.c' \
+              'security/selinux/avc.c' \
+              'drivers/input/input.c' \
+              > "${PATCH_WORK}" || true
 
-          rm -rf SUSFS
-
-          # 주의: 예전에는 `--depth=1 --branch "${SUSFS_REF}"` 로 얕은
-          # clone을 했는데, 이 방식은 SUSFS_REF가 "브랜치/태그 이름"일
-          # 때만 동작하고, 특정 커밋 SHA로 고정하고 싶어도 그 커밋이
-          # 최신 HEAD가 아니면 shallow fetch가 실패한다.
-          #
-          # kernel-4.14는 흘러가는 브랜치라서(아래 "SUSFS-KernelSU ABI
-          # 사전검사" 단계 참고), 언젠가 이 브랜치의 과거 특정 커밋을
-          # SUSFS_REF로 고정해야 할 일이 반드시 생긴다. 그래서 전체
-          # 히스토리를 받아온 뒤 checkout하는 방식으로 바꿨다: 브랜치
-          # 이름이든 임의의 커밋 SHA든 둘 다 그대로 동작한다.
-          # (트레이드오프: clone이 이전보다 다소 느려진다.)
-          git clone \
-            "${SUSFS_REPO}" \
-            SUSFS
-
-          cd SUSFS
-
-          git checkout --detach "${SUSFS_REF}"
-
-          SUSFS_COMMIT="$(git rev-parse HEAD)"
-          SUSFS_COMMIT_DATE="$(git show -s --format=%ci HEAD)"
-
-          echo "SUSFS ref requested: ${SUSFS_REF}"
-          echo "SUSFS commit:        ${SUSFS_COMMIT}"
-          echo "SUSFS commit date:   ${SUSFS_COMMIT_DATE}"
-
-          test -f kernel_patches/50_add_susfs_in_kernel-4.14.patch
-          test -f kernel_patches/fs/susfs.c
-          test -f kernel_patches/include/linux/susfs.h
-
-          cd "${KROOT}"
-
-          rsync -a \
-            SUSFS/kernel_patches/fs/ \
-            fs/
-
-          rsync -a \
-            SUSFS/kernel_patches/include/linux/ \
-            include/linux/
-
-          # Clean patch application without dangerous rej file resolution
-          patch -p1 --forward --batch < SUSFS/kernel_patches/50_add_susfs_in_kernel-4.14.patch || true
-
-          # Clean up any rej or orig files
-          find . -name "*.rej" -o -name "*.orig" | xargs rm -f || true
-
-          # KernelSU-Next(${KSUN_REF}, tag ${KSU_VERSION_TAG})는
-          # "legacy-susfs" 계열 SUSFS API를 기대하고 만들어졌지만, 이
-          # 워크플로가 실제로 받아오는 SUSFS_REPO/SUSFS_REF
-          # (simonpunk/susfs4ksu.git, 브랜치 kernel-4.14)는 고정 커밋이
-          # 아닌 흘러가는 브랜치라서, 두 트리의 API 버전이 어긋날 수
-          # 있다. 실제로 아래 심볼 하나가 이 조합에서 누락되어 있었다:
-          #
-          #   drivers/kernelsu/hook/setuid_hook.c:190:5: error:
-          #   implicit declaration of function
-          #   'susfs_set_current_proc_umounted'
-          #
-          # (2026-09-27 빌드 로그, logs_98344795171.zip 확인)
-          #
-          # 아래는 susfs_extra_works에 이미 쓰던 것과 동일한 "ABI FIX"
-          # 스텁 패턴을 재사용해 빌드가 통과하도록 만드는 임시 조치다.
-          # 주의: 이 스텁은 build-fix 용 no-op이며, SUSFS의 실제
-          # "umount된 프로세스에서 sus_mount 은닉" 동작을 수행하지
-          # 않는다. sus_path/sus_kstat/spoof_uname 등 다른 SUSFS 기능은
-          # 이 심볼과 무관하게 정상 동작한다. 장기적으로는
-          # SUSFS_REF를 KSUN_REF(v3.4.0-legacy-susfs-v2)와 실제로
-          # 짝이 맞는 고정 커밋으로 바꾸는 것이 올바른 해결책이다.
-          python3 <<'PY'
-          from pathlib import Path
-
-          susfs_h = Path("include/linux/susfs.h")
-          susfs_c = Path("fs/susfs.c")
-
-          # (header declaration text, C definition text, marker to search for)
-          abi_stubs = [
-              (
-                  "susfs_extra_works",
-                  "extern void susfs_extra_works(void);\n",
-                  "void susfs_extra_works(void) {}\n",
-              ),
-              (
-                  "susfs_set_current_proc_umounted",
-                  "extern void susfs_set_current_proc_umounted(void);\n",
-                  "void susfs_set_current_proc_umounted(void) {}\n",
-              ),
-          ]
-
-          if susfs_h.exists() and susfs_c.exists():
-              text_h = susfs_h.read_text()
-              text_c = susfs_c.read_text()
-
-              for symbol, decl, defn in abi_stubs:
-                  if symbol not in text_h:
-                      text_h += f"\n{decl}"
-                      print(f"[ABI FIX] Added {symbol} declaration to include/linux/susfs.h")
-                  if symbol not in text_c:
-                      text_c += f"\n{defn}"
-                      print(f"[ABI FIX] Added {symbol} stub definition to fs/susfs.c")
-
-              susfs_h.write_text(text_h)
-              susfs_c.write_text(text_c)
+            # exec.c/reboot.c/block_dev.c 는 manual hook 단계 및 exFAT 관련이라
+            # 제외한다(중복 삽입/충돌 방지).
+            python3 - "${PATCH_WORK}" <<'PY'
+          import re, sys, pathlib
+          p = pathlib.Path(sys.argv[1])
+          src = p.read_text()
+          EXCLUDE = {"fs/exec.c", "kernel/reboot.c", "fs/block_dev.c", "include/linux/blkdev.h"}
+          keep = []
+          for c in re.split(r'(?m)^(?=diff --git )', src):
+              m = re.match(r'diff --git a/(\S+) b/(\S+)', c)
+              if not m:
+                  continue
+              if m.group(2) not in EXCLUDE:
+                  keep.append(c)
+          p.write_text("".join(keep))
+          print(f"[SUSFS] patch chunks kept: {len(keep)}")
           PY
+          fi
 
+          test -s "${PATCH_WORK}"
+          echo "SUSFS patch size: $(wc -c < "${PATCH_WORK}") bytes"
+
+          # 2) 패치 적용
+          cd "${KROOT}"
+
+          # `git apply` 는 컨텍스트가 1줄만 달라도 거부한다. sunfish 순정 트리와
+          # 유지보수 트리의 라인 오프셋 차이를 흡수해야 하므로 patch(1)의 fuzz를 쓴다.
+          patch -p1 --forward --batch -F3 < "${PATCH_WORK}" > "${GITHUB_WORKSPACE}/susfs-patch.log" 2>&1 || true
+
+          echo "---- SUSFS patch log (FAILED 라인) ----"
+          grep -n -iE "FAILED|malformed|can't find file" "${GITHUB_WORKSPACE}/susfs-patch.log" || echo "(no failures reported)"
+
+          # 3) 절대 규칙: 거부된 hunk 가 하나라도 있으면 조용히 넘어가지 않는다.
+          if find . -name "*.rej" -print -quit | grep -q .; then
+            echo "=================================================="
+            echo "ERROR: SUSFS 패치가 일부 적용되지 않았습니다 (.rej 존재)"
+            echo "=================================================="
+            find . -name "*.rej" | while read -r f; do
+              echo "----- ${f} -----"
+              cat "${f}"
+            done
+            exit 1
+          fi
+
+          # 4) 결과 파일 검증
           test -f fs/susfs.c
           test -f include/linux/susfs.h
+          test -f include/linux/susfs_def.h
 
-          grep -Fq \
-            'obj-$(CONFIG_KSU_SUSFS) += susfs.o' \
-            fs/Makefile
+          SUSFS_VERSION="$(grep -E '^#define SUSFS_VERSION' include/linux/susfs.h | cut -d'"' -f2)"
+          echo "SUSFS_VERSION: ${SUSFS_VERSION}"
+          echo "SUSFS_VERSION=${SUSFS_VERSION}" >> "${GITHUB_ENV}"
+
+          grep -Fq 'obj-$(CONFIG_KSU_SUSFS) += susfs.o' fs/Makefile || \
+            printf '\nobj-$(CONFIG_KSU_SUSFS) += susfs.o\n' >> fs/Makefile
+
+          grep -Fq 'susfs_task_state' include/linux/sched.h || {
+            echo "ERROR: include/linux/sched.h 에 susfs_task_state 필드가 없습니다."
+            exit 1
+          }
 
           echo "SUSFS kernel-side integration OK."
 
-      - name: SUSFS-KernelSU ABI 사전검사
+      - name: KernelSU-Next / SUSFS ABI 사전검사
         shell: bash
         run: |
           set -euo pipefail
 
-          KROOT="${GITHUB_WORKSPACE}/kernel_workspace/private/msm-google"
-
+          KROOT="${GITHUB_WORKSPACE}/kernel_workspace/${KROOT_NAME}"
           cd "${KROOT}"
 
-          # drivers/kernelsu(KernelSU-Next)가 호출하는 모든 susfs_* /
-          # ksu_susfs_* 식별자를 추출한 뒤, 커널 트리의 나머지 부분
-          # (fs, include/linux, kernel, security, mm 등: drivers/kernelsu
-          # 자기 자신은 제외)에 그 이름이 단 한 번도 등장하지 않으면
-          # "선언조차 안 된 심볼"로 간주해 빌드 전에 미리 실패시킨다.
-          #
-          # 이전 버전은 susfs_extra_works 딱 하나만 검사했는데, 실제로는
-          # susfs_set_current_proc_umounted 같은 *다른* 심볼이 누락되어
-          # 있어도 이 프리플라이트를 통과해버리고 20분짜리 빌드가 끝날
-          # 때쯤에야 실패하는 문제가 있었다 (logs_98344795171.zip 사례).
+          # ------------------------------------------------------------------
+          # 심볼을 두 그룹으로 나눈다.
+          #   (A) KSUN 자기 트리에서 정의되는 것 (selinux 헬퍼 등)
+          #       -> 예전 구현은 이걸 못 찾아 "누락"으로 오탐했다.
+          #   (B) SUSFS가 반드시 제공해야 하는 것
+          #       -> 이것만 진짜 검사 대상.
+          # ------------------------------------------------------------------
           mapfile -t CALLED_SYMS < <(
             grep -RhoE '\b(susfs|ksu_susfs)_[A-Za-z0-9_]+[[:space:]]*\(' \
               drivers/kernelsu \
@@ -772,163 +709,122 @@ jobs:
             | sort -u
           )
 
-          MISSING=()
+          REAL_MISSING=()
+          SELF_OK=()
+          IGNORED=()
 
           for sym in "${CALLED_SYMS[@]:-}"; do
             [ -z "${sym}" ] && continue
 
-            if ! grep -RqE "\b${sym}\b" \
-                 --include='*.c' --include='*.h' \
-                 --exclude-dir=kernelsu \
-                 fs include/linux kernel security mm net drivers \
-                 2>/dev/null; then
-              MISSING+=("${sym}")
+            # (A) KSUN 자기 트리(심볼릭 링크 포함)에서 정의/선언되는지 먼저 본다.
+            if grep -RqE "^[A-Za-z_].*[^A-Za-z0-9_]${sym}[[:space:]]*\(|extern[^;]*\b${sym}\b|static inline[^;]*\b${sym}\b" \
+                 drivers/kernelsu/Kconfig drivers/kernelsu/Kbuild 2>/dev/null; then
+              SELF_OK+=("${sym}")
+              continue
             fi
-          done
 
-          # ------------------------------------------------------------
-          # 2026-09-27 업데이트: 처음 이 프리플라이트를 도입했을 때는
-          # "누락 = 무조건 빌드 실패"로만 처리했다. 그런데 실제로
-          # 겪어보니, 누락 목록에 susfs_add_sus_map / susfs_add_sus_memfd
-          # 처럼 이 워크플로가 "Sunfish defconfig 설정" 단계에서 이미
-          # CONFIG_KSU_SUSFS_SUS_MAP / CONFIG_KSU_SUSFS_SUS_MEMFD 를
-          # 의도적으로 비활성화하는(그리고 "빌드 결과 검증" 단계가
-          # require_not_y로 재확인하는) 기능의 심볼도 섞여 나온다.
-          #
-          # 이 grep 기반 프리플라이트는 텍스트만 보고 #ifdef 여부를
-          # 모르기 때문에, 해당 심볼 호출부가 어차피 컴파일 대상에서
-          # 빠질 #ifdef CONFIG_KSU_SUSFS_SUS_MAP/SUS_MEMFD 블록 안에
-          # 있어도 "누락"으로 잡아버린다 (오탐 가능성). 그래서 아래
-          # 이름 패턴에 걸리는 심볼만 "정보성 경고"로 낮추고, 나머지는
-          # 예전처럼 그대로 빌드를 막는다.
-          #
-          # 이 예외 처리는 "SUS_MAP/SUS_MEMFD가 이 워크플로에서 항상
-          # 비활성 상태"라는, defconfig/검증 단계와 지금 손으로 맞춰본
-          # 가정에 기대고 있다. 만약 나중에 저 두 옵션을 켜게 된다면
-          # 이 예외 목록도 반드시 같이 지워야 한다. 그리고 이 예외가
-          # 틀렸을 경우(실제로는 #ifdef 밖에서 무조건 호출되는 경우)
-          # 프리플라이트는 통과하겠지만, 뒤이은 "커널 빌드" 단계가
-          # 실제 컴파일러 에러(예: undefined reference / implicit
-          # declaration)로 잡아줄 것이고, 그 단계는 이미 에러 로그를
-          # 자동으로 추려서 보여주도록 되어 있다.
-          KNOWN_DISABLED_FEATURE_PATTERN='sus_map|sus_memfd'
-
-          REAL_MISSING=()
-          IGNORED_MISSING=()
-
-          for sym in "${MISSING[@]:-}"; do
-            [ -z "${sym}" ] && continue
-
-            if [[ "${sym}" =~ ${KNOWN_DISABLED_FEATURE_PATTERN} ]]; then
-              IGNORED_MISSING+=("${sym}")
+            # (B) 커널 나머지 + KSUN 트리 전체에서 실제 정의를 찾는다.
+            if grep -qE "^[A-Za-z_].*[^A-Za-z0-9_]${sym}[[:space:]]*\(" \
+                 --include='*.c' --include='*.h' -r \
+                 drivers/kernelsu fs include/linux kernel security mm net drivers 2>/dev/null; then
+              SELF_OK+=("${sym}")
+            elif grep -qE "\b${sym}\b" \
+                 --include='*.c' --include='*.h' -r \
+                 fs include/linux kernel security mm net drivers 2>/dev/null; then
+              SELF_OK+=("${sym}")
+            elif [[ "${sym}" =~ sus_map|sus_memfd ]]; then
+              # 이 워크플로는 CONFIG_KSU_SUSFS_SUS_MAP / SUS_MEMFD 를
+              # 비활성화하고, "빌드 결과 검증" 단계가 그 상태를 재확인한다.
+              IGNORED+=("${sym}")
             else
               REAL_MISSING+=("${sym}")
             fi
           done
 
-          if [ "${#IGNORED_MISSING[@]}" -gt 0 ]; then
-            echo
-            echo "-- 정보: 아래 심볼은 SUS_MAP/SUS_MEMFD 관련으로 보여,"
-            echo "   이 워크플로가 defconfig에서 항상 비활성화하는"
-            echo "   기능과 연관된 것으로 추정하고 빌드를 막지 않는다."
-            echo "   (가정이 틀렸다면 '커널 빌드' 단계에서 컴파일러가"
-            echo "   진짜 에러로 잡아줄 것이다.)"
-            for sym in "${IGNORED_MISSING[@]}"; do
-              echo "     - ${sym}"
-            done
+          echo "ABI preflight: ${#CALLED_SYMS[@]} symbol(s) referenced from KernelSU-Next."
+          echo "  resolved : ${#SELF_OK[@]}"
+          echo "  ignored  : ${#IGNORED[@]} (SUS_MAP/SUS_MEMFD, disabled by defconfig)"
+
+          if [ "${#IGNORED[@]}" -gt 0 ]; then
+            for sym in "${IGNORED[@]}"; do echo "    - ${sym}"; done
           fi
 
           if [ "${#REAL_MISSING[@]}" -gt 0 ]; then
             KSUN_COMMIT_DATE="$(cat "${GITHUB_WORKSPACE}/ksun_commit_date.txt" 2>/dev/null || echo unknown)"
-
             echo
             echo "=================================================="
             echo "ERROR: KernelSU-Next / SUSFS ABI mismatch"
             echo "=================================================="
-            echo "KernelSU-Next ${KSUN_REF} (tag ${KSU_VERSION_TAG})"
-            echo "  commit date: ${KSUN_COMMIT_DATE}"
-            echo "calls the following symbol(s), but SUSFS ${SUSFS_REPO}"
-            echo "(ref: ${SUSFS_REF}) does not define/declare them anywhere"
-            echo "in the kernel tree:"
+            echo "KernelSU-Next $(cat "${GITHUB_WORKSPACE}/ksun_commit.txt" 2>/dev/null || echo "${KSUN_REF}")"
+            echo "  (tag ${KSU_VERSION_TAG}, commit date: ${KSUN_COMMIT_DATE})"
+            echo "SUSFS ${SUSFS_VERSION:-unknown}"
             echo
-            for sym in "${REAL_MISSING[@]}"; do
-              echo "  - ${sym}"
-            done
+            echo "다음 심볼이 커널 트리 어디에도 정의되어 있지 않습니다:"
+            for sym in "${REAL_MISSING[@]}"; do echo "  - ${sym}"; done
             echo
-            echo "이 심볼들은 SID 스푸핑 / AVC 로그 위조 / sdcard 감시"
-            echo "스레드처럼 실제 동작이 있는 기능이라, 빈 no-op 스텁을"
-            echo "덧붙이는 방식은 권장하지 않는다 (반환형을 모르면"
-            echo "컴파일이 깨지거나, 맞더라도 은닉 기능이 조용히"
-            echo "무력화될 수 있다)."
-            echo
-            echo "대신 다음을 시도할 것:"
-            echo "  1) SUSFS_REF를 흘러가는 브랜치명(kernel-4.14) 대신"
-            echo "     이 KernelSU-Next 커밋과 실제로 호환되는 SUSFS"
-            echo "     커밋 SHA로 고정한다. 후보를 찾으려면:"
-            echo "     https://gitlab.com/simonpunk/susfs4ksu/-/commits/kernel-4.14"
-            echo "     의 커밋 이력에서 위 심볼들이 추가된 지점을 찾는다."
-            echo "  2) 또는 sidex15/KernelSU-Next 저장소의 이슈/PR에서"
-            echo "     위 심볼명으로 검색해 이미 정리된 호환 조합이"
-            echo "     있는지 확인한다(예: PR #12 'Legacy susfs v2 pr"
-            echo "     clean'은 이 legacy-susfs-v2 브랜치를 msm-4.9/"
-            echo "     msm-4.14에 이식하며 겪은 문제들을 다룬다)."
-            echo "  3) workflow_dispatch 입력(ksun_ref / susfs_ref)으로"
-            echo "     후보 조합을 YAML 수정 없이 바로 재시도해볼 수"
-            echo "     있다."
+            echo "no-op 스텁으로 덮지 마십시오. 이 심볼들은 반환값/자료형이"
+            echo "실제로 쓰이므로(예: susfs_extra_works 는 KSUN에서"
+            echo "struct work_struct 객체로 선언됨) 스텁을 붙이면"
+            echo "선언 충돌로 컴파일이 깨지거나 은닉이 조용히 무력화됩니다."
+            echo "SUSFS 쪽 소스를 KernelSU-Next 커밋과 짝이 맞는 것으로"
+            echo "교체하는 것이 유일한 정답입니다."
             echo "=================================================="
             exit 1
           fi
 
-          echo "KernelSU-Next / SUSFS ABI preflight: OK (${#CALLED_SYMS[@]} symbol(s) checked, ${#IGNORED_MISSING[@]} informational)."
+          echo "KernelSU-Next / SUSFS ABI preflight: OK"
 
       - name: NoMount 통합
         shell: bash
         run: |
           set -euo pipefail
 
-          KROOT="${GITHUB_WORKSPACE}/kernel_workspace/private/msm-google"
-
+          KROOT="${GITHUB_WORKSPACE}/kernel_workspace/${KROOT_NAME}"
           cd "${KROOT}"
 
           rm -rf NoMount
+          git clone --depth=1 --branch "${NOMOUNT_REF}" "${NOMOUNT_REPO}" NoMount
 
-          git clone \
-            --depth=1 \
-            --branch "${NOMOUNT_REF}" \
-            "${NOMOUNT_REPO}" \
-            NoMount
-
-          cd NoMount
-
-          NOMOUNT_COMMIT="$(git rev-parse HEAD)"
-
+          NOMOUNT_COMMIT="$(git -C NoMount rev-parse HEAD)"
           echo "NoMount commit: ${NOMOUNT_COMMIT}"
-
-          test -d kernel/src
-          test -f kernel/README.md
 
           cd "${KROOT}"
 
+          # 저장소 레이아웃이 바뀌어도 버티도록 Kconfig+소스가 같이 있는
+          # 디렉터리를 찾아낸다.
+          NOMOUNT_SRC="$(
+            find NoMount -type f -name "Kconfig" -printf '%h\n' 2>/dev/null \
+              | while read -r d; do
+                  if ls "${d}"/*.c >/dev/null 2>&1; then echo "${d}"; break; fi
+                done
+          )"
+
+          if [ -z "${NOMOUNT_SRC}" ]; then
+            echo "ERROR: NoMount 소스 디렉터리를 찾지 못했습니다."
+            find NoMount -maxdepth 3 -type f | sort | head -50
+            exit 1
+          fi
+          echo "NoMount source dir: ${NOMOUNT_SRC}"
+
+          NOMOUNT_SYMBOL="$(grep -oE '^[[:space:]]*config[[:space:]]+[A-Z0-9_]+' "${NOMOUNT_SRC}/Kconfig" | awk '{print $2}' | head -n 1)"
+          if [ -z "${NOMOUNT_SYMBOL}" ]; then
+            echo "ERROR: NoMount Kconfig 에서 config 심볼을 읽지 못했습니다."
+            exit 1
+          fi
+          echo "NoMount Kconfig symbol: ${NOMOUNT_SYMBOL}"
+          echo "NOMOUNT_SYMBOL=${NOMOUNT_SYMBOL}" >> "${GITHUB_ENV}"
+
           rm -rf fs/nomount
           mkdir -p fs/nomount
+          rsync -a "${NOMOUNT_SRC}/" fs/nomount/
 
-          rsync -a \
-            NoMount/kernel/src/ \
-            fs/nomount/
-
-          grep -Fqx \
-            'source "fs/nomount/Kconfig"' \
-            fs/Kconfig || \
+          grep -Fqx 'source "fs/nomount/Kconfig"' fs/Kconfig || \
             printf '\nsource "fs/nomount/Kconfig"\n' >> fs/Kconfig
 
-          grep -Fqx \
-            'obj-$(CONFIG_NOMOUNT) += nomount/' \
-            fs/Makefile || \
-            printf '\nobj-$(CONFIG_NOMOUNT) += nomount/\n' >> fs/Makefile
+          grep -Fqx "obj-\$(CONFIG_${NOMOUNT_SYMBOL}) += nomount/" fs/Makefile || \
+            printf '\nobj-$(CONFIG_%s) += nomount/\n' "${NOMOUNT_SYMBOL}" >> fs/Makefile
 
           test -f fs/nomount/Kconfig
-          grep -Fq 'config NOMOUNT' fs/nomount/Kconfig
-
           echo "NoMount integration OK."
 
       - name: Sunfish defconfig 설정
@@ -936,54 +832,54 @@ jobs:
         run: |
           set -euo pipefail
 
-          cd "${GITHUB_WORKSPACE}/kernel_workspace/private/msm-google"
+          KROOT="${GITHUB_WORKSPACE}/kernel_workspace/${KROOT_NAME}"
+          cd "${KROOT}"
 
           DEFCONFIG="arch/arm64/configs/sunfish_defconfig"
-
           test -f "${DEFCONFIG}"
 
-          remove_config() {
-            local key="$1"
+          KSUN_KCONFIG="drivers/kernelsu/Kconfig"
 
+          remove_config() {
             sed -i \
-              -e "/^[[:space:]]*CONFIG_${key}=.*/d" \
-              -e "/^[[:space:]]*# CONFIG_${key} is not set$/d" \
+              -e "/^[[:space:]]*CONFIG_$1=.*/d" \
+              -e "/^[[:space:]]*# CONFIG_$1 is not set$/d" \
               "${DEFCONFIG}"
           }
 
           set_bool() {
-            local key="$1"
-            local value="$2"
-
-            remove_config "${key}"
-
-            printf 'CONFIG_%s=%s\n' \
-              "${key}" \
-              "${value}" \
-              >> "${DEFCONFIG}"
+            local key="$1" value="$2"
+            # KSUN Kconfig 에 실제로 존재하는 키만 반영한다.
+            # (존재하지 않는 키를 밀어 넣으면 검증 단계가 거짓 실패한다.)
+            if [ "${key}" = "KSU" ] || grep -qE "^[[:space:]]*config[[:space:]]+${key}\b" "${KSUN_KCONFIG}"; then
+              remove_config "${key}"
+              printf 'CONFIG_%s=%s\n' "${key}" "${value}" >> "${DEFCONFIG}"
+            else
+              echo "[SKIP] CONFIG_${key} 는 ${KSUN_KCONFIG} 에 없음"
+            fi
           }
 
           disable_bool() {
             local key="$1"
-
-            remove_config "${key}"
-
-            printf '# CONFIG_%s is not set\n' \
-              "${key}" \
-              >> "${DEFCONFIG}"
+            if [ "${key}" = "KSU" ] || grep -qE "^[[:space:]]*config[[:space:]]+${key}\b" "${KSUN_KCONFIG}" \
+               || grep -qE "^[[:space:]]*config[[:space:]]+${key}\b" Kconfig arch/arm64/Kconfig 2>/dev/null; then
+              remove_config "${key}"
+              printf '# CONFIG_%s is not set\n' "${key}" >> "${DEFCONFIG}"
+            else
+              echo "[SKIP] CONFIG_${key} 는 대상 Kconfig 에 없음"
+            fi
           }
 
-          # Prevent UTS_RELEASE length overflow caused by setlocalversion
+          # setlocalversion 로 인한 UTS_RELEASE 길이 초과 방지는 그대로 유지한다.
           disable_bool LOCALVERSION_AUTO
 
-          # Linux 4.14: Manual Hook.
+          # Linux 4.14 -> manual hook 고정
           set_bool KSU y
           set_bool KSU_MANUAL_HOOK y
-
           disable_bool KSU_KPROBES_HOOK
           disable_bool KSU_SYSCALL_TABLE_HOOK
 
-          # SUSFS options
+          # SUSFS
           set_bool KSU_SUSFS y
           set_bool KSU_SUSFS_SUS_PATH y
           set_bool KSU_SUSFS_SUS_MOUNT y
@@ -994,20 +890,21 @@ jobs:
           set_bool KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS y
           set_bool KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG y
           set_bool KSU_SUSFS_OPEN_REDIRECT y
-
           disable_bool KSU_SUSFS_SUS_MAP
           disable_bool KSU_SUSFS_SUS_MEMFD
 
+          # NoMount / overlayfs
+          set_bool "${NOMOUNT_SYMBOL:-NOMOUNT}" y
           set_bool OVERLAY_FS y
 
-          set_bool NOMOUNT y
-
+          # BBR
           set_bool TCP_CONG_ADVANCED y
           set_bool TCP_CONG_BBR y
-
           remove_config DEFAULT_TCP_CONG
           printf 'CONFIG_DEFAULT_TCP_CONG="bbr"\n' >> "${DEFCONFIG}"
 
+          echo "==== defconfig tail ===="
+          tail -n 40 "${DEFCONFIG}"
           echo "Sunfish defconfig configured."
 
       - name: Google build config 복사
@@ -1015,12 +912,10 @@ jobs:
         run: |
           set -euo pipefail
 
-          cd "${GITHUB_WORKSPACE}/kernel_workspace/private/msm-google"
+          KROOT="${GITHUB_WORKSPACE}/kernel_workspace/${KROOT_NAME}"
+          cd "${KROOT}"
 
-          cp \
-            build.config.sunfish \
-            build.config.sunfish.custom
-
+          cp build.config.sunfish build.config.sunfish.custom
           cat >> build.config.sunfish.custom <<'EOF'
 
           # Custom KernelSU-Next / SUSFS / NoMount build.
@@ -1036,25 +931,16 @@ jobs:
           set -euo pipefail
 
           cd "${GITHUB_WORKSPACE}/kernel_workspace"
-
           rm -rf out
-
-          # Clean up any nested .git directories that trigger setlocalversion length issues
-          find private/msm-google/drivers/kernelsu private/msm-google/SUSFS private/msm-google/NoMount -name ".git" -exec rm -rf {} + 2>/dev/null || true
 
           export POST_DEFCONFIG_CMDS=""
           export SKIP_DEFCONFIG_CHECK=1
           export CONFIG_KSU_MANUAL_HOOK=y
-          export KSU_GIT_VERSION="${KSUN_REF}"
-          export KSU_VERSION_TAG="v3.4.0-legacy-susfs-v2"
+          export KSU_VERSION_TAG="${KSU_VERSION_TAG}"
+          if [ -n "${KSU_VERSION_OVERRIDE}" ]; then
+            export KSU_VERSION_OVERRIDE="${KSU_VERSION_OVERRIDE}"
+          fi
 
-          set -o pipefail
-
-          # V=1: kbuild가 실패한 실제 명령/에러 줄을 그대로 출력하게 강제한다.
-          # 이게 없으면 하위 make가 실패해도 상위에서는
-          # "make[N]: *** [Makefile:NNNN: drivers] Error 2" 같은
-          # 요약 메시지만 보이고, 정작 원인이 된 컴파일러/Kbuild 진단은
-          # 로그에서 사라진 것처럼 보일 수 있다 (err7.txt가 그 경우).
           set +e
           LTO=thin \
           BUILD_CONFIG=private/msm-google/build.config.sunfish.custom \
@@ -1070,12 +956,9 @@ jobs:
             echo "빌드 실패. 실제 원인으로 추정되는 로그 구간 (자동 추출):"
             echo "=================================================="
             grep -n -iE \
-              "error:|error [0-9]+|missing separator|no rule to make target|undefined reference|multiple definition|fatal error|No such file or directory" \
+              "error:|error [0-9]+|missing separator|no rule to make target|undefined reference|multiple definition|fatal error|No such file or directory|implicit declaration" \
               "${GITHUB_WORKSPACE}/kernel-build.log" \
-              | tail -n 60 || true
-            echo "=================================================="
-            echo "위 구간이 비어 있다면 kernel-build.log 전체를"
-            echo "'빌드 진단정보 업로드' 아티팩트에서 직접 확인할 것."
+              | tail -n 80 || true
             echo "=================================================="
             exit "${BUILD_STATUS}"
           fi
@@ -1085,108 +968,66 @@ jobs:
         run: |
           set -euo pipefail
 
-          KROOT="${GITHUB_WORKSPACE}/kernel_workspace/private/msm-google"
+          KROOT="${GITHUB_WORKSPACE}/kernel_workspace/${KROOT_NAME}"
           OUT="${GITHUB_WORKSPACE}/kernel_workspace/out"
-          LOG="${GITHUB_WORKSPACE}/kernel-build.log"
-
           cd "${KROOT}"
 
-          CONFIG_FILE="$(
-            find "${OUT}" \
-              -type f \
-              -path "*/private/msm-google/.config" \
-              | head -n 1
-          )"
-
+          CONFIG_FILE="$(find "${OUT}" -type f -path "*/${KROOT_NAME}/.config" | head -n 1)"
           test -n "${CONFIG_FILE}"
+          echo "kernel .config: ${CONFIG_FILE}"
 
           require_yes() {
-            local key="$1"
-
-            grep -q "^${key}=y$" "${CONFIG_FILE}" || {
-              echo "ERROR: ${key}=y missing"
-              exit 1
-            }
+            grep -q "^$1=y$" "${CONFIG_FILE}" || { echo "ERROR: $1=y missing"; exit 1; }
           }
-
           require_not_y() {
-            local key="$1"
-
-            ! grep -q "^${key}=y$" "${CONFIG_FILE}" || {
-              echo "ERROR: ${key}=y must be disabled"
-              exit 1
-            }
+            ! grep -q "^$1=y$" "${CONFIG_FILE}" || { echo "ERROR: $1=y must be disabled"; exit 1; }
           }
 
           require_yes CONFIG_KSU
           require_yes CONFIG_KSU_MANUAL_HOOK
-
           require_not_y CONFIG_KSU_KPROBES_HOOK
           require_not_y CONFIG_KSU_SYSCALL_TABLE_HOOK
 
-          require_yes CONFIG_KSU_SUSFS
-          require_yes CONFIG_KSU_SUSFS_SUS_PATH
-          require_yes CONFIG_KSU_SUSFS_SUS_MOUNT
-          require_yes CONFIG_KSU_SUSFS_SUS_KSTAT
-          require_yes CONFIG_KSU_SUSFS_TRY_UMOUNT
-          require_yes CONFIG_KSU_SUSFS_SPOOF_UNAME
-          require_yes CONFIG_KSU_SUSFS_ENABLE_LOG
-          require_yes CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS
-          require_yes CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG
-          require_yes CONFIG_KSU_SUSFS_OPEN_REDIRECT
+          # SUSFS: 실제 Kconfig 에 존재하는 키만 검사한다.
+          while read -r key; do
+            [ -z "${key}" ] && continue
+            case "${key}" in
+              CONFIG_KSU_SUSFS_SUS_MAP|CONFIG_KSU_SUSFS_SUS_MEMFD) require_not_y "${key}" ;;
+              *) require_yes "${key}" ;;
+            esac
+          done < <(grep -oE '^[[:space:]]*config[[:space:]]+KSU_SUSFS[A-Z0-9_]*' \
+                     drivers/kernelsu/Kconfig | awk '{print "CONFIG_"$2}' | sort -u)
 
-          require_not_y CONFIG_KSU_SUSFS_SUS_MAP
-          require_not_y CONFIG_KSU_SUSFS_SUS_MEMFD
-
+          require_yes "CONFIG_${NOMOUNT_SYMBOL:-NOMOUNT}"
           require_yes CONFIG_OVERLAY_FS
-          require_yes CONFIG_NOMOUNT
-
           require_yes CONFIG_TCP_CONG_ADVANCED
           require_yes CONFIG_TCP_CONG_BBR
-
           grep -q '^CONFIG_DEFAULT_TCP_CONG="bbr"$' "${CONFIG_FILE}" || {
-            echo "ERROR: BBR is not the default TCP congestion control."
-            exit 1
-          }
-
-          test -d drivers/kernelsu
-          test -f drivers/kernelsu/Kbuild
-          test -f drivers/kernelsu/Kconfig
-          test -f drivers/kernelsu/uapi/app_profile.h
+            echo "ERROR: BBR is not the default TCP congestion control."; exit 1; }
 
           test -f fs/susfs.c
           test -f include/linux/susfs.h
           grep -Fq 'obj-$(CONFIG_KSU_SUSFS) += susfs.o' fs/Makefile
-
+          test -e drivers/kernelsu/Kbuild
           test -f fs/nomount/Kconfig
-          grep -Fq 'source "fs/nomount/Kconfig"' fs/Kconfig
-          grep -Fq 'obj-$(CONFIG_NOMOUNT) += nomount/' fs/Makefile
 
-          IMAGE="$(
-            find "${OUT}" \
-              -type f \
-              -name "Image.lz4-dtb" \
-              | sort \
-              | head -n 1
-          )"
-
+          IMAGE="$(find "${OUT}" -type f -name "Image.lz4-dtb" | sort | head -n 1)"
           if [ -z "${IMAGE}" ]; then
             echo "ERROR: Image.lz4-dtb was not produced."
             find "${OUT}" -type f | sort | tail -200
             exit 1
           fi
 
-          KERNEL_VERSION="$(make -s kernelversion)"
-
           {
             echo "DEVICE=Pixel 4a"
             echo "CODENAME=sunfish"
+            echo "BOOT_BUILD=TQ3A.230805.001.S1"
             echo "KERNEL_BRANCH=${KERNEL_BRANCH}"
-            echo "KERNEL_VERSION=${KERNEL_VERSION}"
+            echo "KERNEL_VERSION=${KERNEL_VERSION:-$(make -s kernelversion)}"
             echo "KSUN_REPO=${KSUN_REPO}"
-            echo "KSUN_REF=${KSUN_REF}"
-            echo "SUSFS_REPO=${SUSFS_REPO}"
-            echo "SUSFS_REF=${SUSFS_REF}"
+            echo "KSUN_REF=$(cat "${GITHUB_WORKSPACE}/ksun_commit.txt")"
+            echo "KSU_VERSION_TAG=${KSU_VERSION_TAG}"
+            echo "SUSFS_VERSION=${SUSFS_VERSION:-unknown}"
             echo "NOMOUNT_REPO=${NOMOUNT_REPO}"
             echo "NOMOUNT_REF=${NOMOUNT_REF}"
             echo "BUILD_DATE=$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
@@ -1196,7 +1037,7 @@ jobs:
           sha256sum "${IMAGE}" > "${GITHUB_WORKSPACE}/KERNEL_SHA256SUM.txt"
 
           echo "BUILD VERIFICATION: PASS"
-          echo "IMAGE=${IMAGE}"
+          cat "${GITHUB_WORKSPACE}/BUILD_INFO.txt"
           sha256sum "${IMAGE}"
 
       - name: AnyKernel3 패키징
@@ -1205,54 +1046,30 @@ jobs:
           set -euo pipefail
 
           cd "${GITHUB_WORKSPACE}"
-
           rm -rf AnyKernel3
 
-          git clone \
-            --depth=1 \
-            --branch "${ANYKERNEL3_REF}" \
-            "${ANYKERNEL3_REPO}" \
-            AnyKernel3
-
+          git clone --depth=1 --branch "${ANYKERNEL3_REF}" "${ANYKERNEL3_REPO}" AnyKernel3
           cd AnyKernel3
 
-          IMAGE="$(
-            find \
-              "${GITHUB_WORKSPACE}/kernel_workspace/out" \
-              -type f \
-              -name "Image.lz4-dtb" \
-              | sort \
-              | head -n 1
-          )"
-
+          IMAGE="$(find "${GITHUB_WORKSPACE}/kernel_workspace/out" -type f -name "Image.lz4-dtb" | sort | head -n 1)"
           test -n "${IMAGE}"
-
           cp "${IMAGE}" Image.lz4-dtb
 
           if grep -q '^device.name1=' anykernel.sh; then
-            sed -i \
-              's/^device\.name1=.*/device.name1=sunfish/' \
-              anykernel.sh
+            sed -i 's/^device\.name1=.*/device.name1=sunfish/' anykernel.sh
           else
             printf '\ndevice.name1=sunfish\n' >> anykernel.sh
           fi
 
-          cp \
-            "${GITHUB_WORKSPACE}/BUILD_INFO.txt" \
-            BUILD_INFO.txt
-
-          cp \
-            "${GITHUB_WORKSPACE}/KERNEL_SHA256SUM.txt" \
-            KERNEL_SHA256SUM.txt
+          cp "${GITHUB_WORKSPACE}/BUILD_INFO.txt" BUILD_INFO.txt
+          cp "${GITHUB_WORKSPACE}/KERNEL_SHA256SUM.txt" KERNEL_SHA256SUM.txt
 
           test -f Image.lz4-dtb
 
           cd "${GITHUB_WORKSPACE}"
-
           rm -f Sunfish-KernelSU-Next-SUSFS-NoMount-BBR.zip
 
           cd AnyKernel3
-
           zip -r9 \
             "${GITHUB_WORKSPACE}/Sunfish-KernelSU-Next-SUSFS-NoMount-BBR.zip" \
             . \
@@ -1268,12 +1085,14 @@ jobs:
           retention-days: 30
 
       - name: 빌드 진단정보 업로드
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: Sunfish-Kernel-Build-Diagnostics
           path: |
             kernel-build.log
+            susfs-patch.log
             BUILD_INFO.txt
             KERNEL_SHA256SUM.txt
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 30
