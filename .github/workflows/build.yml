@@ -1,5 +1,4 @@
 name: Build Pixel 4a Sunfish Kernel
-  # KernelSU-Next legacy-susfs-v2 + SUSFS 4.14 + NoMount + BBR
 
 on:
   workflow_dispatch:
@@ -10,50 +9,37 @@ permissions:
 env:
   KERNEL_BRANCH: android-msm-sunfish-4.14-android13
 
+  # Pinned KernelSU-Next legacy SUSFS tree.
   KSUN_REPO: https://github.com/sidex15/KernelSU-Next.git
   KSUN_REF: d999a2aff11575c6e2f520129ecffb7c6058fb02
 
+  # SUSFS Linux 4.14 patch tree.
   SUSFS_REPO: https://gitlab.com/simonpunk/susfs4ksu.git
   SUSFS_REF: kernel-4.14
 
+  # NoMount legacy built-in integration.
   NOMOUNT_REPO: https://github.com/maxsteeel/nomount.git
   NOMOUNT_REF: master
 
   ANYKERNEL3_REPO: https://github.com/osm0sis/AnyKernel3.git
   ANYKERNEL3_REF: master
 
-
 jobs:
-
   build:
-
     runs-on: ubuntu-22.04
 
     steps:
-
-      # ============================================================
-      # 1. Free disk space
-      # ============================================================
       - name: 저장 공간 확장
-
         uses: easimon/maximize-build-space@v8
-
         with:
           root-reserve-mb: 8192
           temp-reserve-mb: 4096
-
           remove-dotnet: true
           remove-android: true
           remove-haskell: true
 
-
-      # ============================================================
-      # 2. Build dependencies
-      # ============================================================
-      - name: 필수 빌드 도구 설치
-
+      - name: 필수 패키지 설치
         shell: bash
-
         run: |
           set -euo pipefail
 
@@ -81,25 +67,13 @@ jobs:
             unzip \
             zip
 
-          echo
-          echo "===== TOOLCHAIN ====="
-
           gcc --version | head -n 1
           clang --version | head -n 1
           git --version
           python3 --version
 
-
-      # ============================================================
-      # 3. Android Repo
-      #
-      # GITHUB_PATH affects the next step only.
-      # Therefore export PATH immediately too.
-      # ============================================================
       - name: Repo 설치
-
         shell: bash
-
         run: |
           set -euo pipefail
 
@@ -118,32 +92,23 @@ jobs:
 
           chmod 0755 "${REPO_DIR}/repo"
 
+          # Persist for later workflow steps.
           echo "${REPO_DIR}" >> "${GITHUB_PATH}"
 
-          # Current shell
+          # Also make it available immediately in this shell.
           export PATH="${REPO_DIR}:${PATH}"
-
-          echo
-          echo "===== REPO ====="
 
           command -v repo
           repo --version
 
-
-      # ============================================================
-      # 4. Pixel 4a Sunfish kernel
-      # ============================================================
-      - name: Pixel 4a 커널 소스 다운로드
-
+      - name: Pixel 4a Sunfish 커널 소스 다운로드
         shell: bash
-
         run: |
           set -euo pipefail
 
           export PATH="${HOME}/bin:${PATH}"
 
           rm -rf "${GITHUB_WORKSPACE}/kernel_workspace"
-
           mkdir -p "${GITHUB_WORKSPACE}/kernel_workspace"
 
           cd "${GITHUB_WORKSPACE}/kernel_workspace"
@@ -161,36 +126,22 @@ jobs:
 
           cd private/msm-google
 
-          echo
-          echo "===== KERNEL VERSION ====="
-
           KERNEL_VERSION="$(make -s kernelversion)"
 
-          echo "${KERNEL_VERSION}"
+          echo "Kernel version: ${KERNEL_VERSION}"
 
           case "${KERNEL_VERSION}" in
             4.14.*)
-              echo "Pixel 4a 4.14 kernel confirmed."
+              echo "Pixel 4a Linux 4.14 kernel confirmed."
               ;;
             *)
-              echo
-              echo "ERROR: Unexpected kernel version."
+              echo "ERROR: Expected Linux 4.14, got ${KERNEL_VERSION}"
               exit 1
               ;;
           esac
 
-
-      # ============================================================
-      # 5. KernelSU-Next
-      #
-      # IMPORTANT:
-      # Keep the entire repository including .git and top-level uapi.
-      # Do NOT copy kernel/* manually.
-      # ============================================================
-      - name: KernelSU-Next legacy-susfs-v2 통합
-
+      - name: KernelSU-Next 통합
         shell: bash
-
         run: |
           set -euo pipefail
 
@@ -201,16 +152,9 @@ jobs:
           rm -rf KernelSU-Next
           rm -f drivers/kernelsu
 
-          echo
-          echo "=================================================="
-          echo "KernelSU-Next"
-          echo "Repository: ${KSUN_REPO}"
-          echo "Commit:     ${KSUN_REF}"
-          echo "=================================================="
+          echo "KernelSU-Next repository: ${KSUN_REPO}"
+          echo "KernelSU-Next commit:     ${KSUN_REF}"
 
-          # --------------------------------------------------------
-          # Clone entire repository.
-          # --------------------------------------------------------
           git clone \
             --filter=blob:none \
             "${KSUN_REPO}" \
@@ -222,173 +166,51 @@ jobs:
 
           KSUN_COMMIT="$(git rev-parse HEAD)"
 
-          echo
-          echo "KernelSU-Next HEAD:"
-          echo "${KSUN_COMMIT}"
+          test "${KSUN_COMMIT}" = "${KSUN_REF}"
 
-          # --------------------------------------------------------
-          # Pin verification
-          # --------------------------------------------------------
-          test "${KSUN_COMMIT}" = "${KSUN_REF}" || {
-            echo
-            echo "ERROR: KernelSU-Next commit mismatch."
-            exit 1
-          }
+          echo "KernelSU-Next HEAD: ${KSUN_COMMIT}"
 
-          # --------------------------------------------------------
-          # Required source files
-          # --------------------------------------------------------
-          check_file() {
-            local f="$1"
+          # Verify the actual source layout before integration.
+          test -f kernel/Kbuild
+          test -f kernel/Kconfig
+          test -f kernel/core/init.c
+          test -f kernel/policy/allowlist.h
+          test -f kernel/policy/app_profile.h
+          test -f uapi/app_profile.h
 
-            if [ ! -f "${f}" ]; then
-              echo
-              echo "ERROR: Required file missing:"
-              echo "${f}"
-              exit 1
-            fi
+          # This branch must expose the legacy manual-hook and SUSFS
+          # configuration symbols.
+          grep -Fq 'config KSU_MANUAL_HOOK' kernel/Kconfig
+          grep -Fq 'config KSU_SUSFS' kernel/Kconfig
 
-            echo "[OK] ${f}"
-          }
-
-          check_file kernel/Kbuild
-          check_file kernel/Kconfig
-          check_file kernel/core/init.c
-          check_file kernel/policy/allowlist.h
-          check_file kernel/policy/app_profile.h
-          check_file uapi/app_profile.h
-          check_file kernel/supercall/supercall.c
-
-          # --------------------------------------------------------
-          # Required KSU config definitions
-          # --------------------------------------------------------
-          grep -Fq \
-            'config KSU' \
-            kernel/Kconfig || {
-              echo "ERROR: CONFIG_KSU definition missing."
-              exit 1
-            }
-
-          grep -Fq \
-            'config KSU_MANUAL_HOOK' \
-            kernel/Kconfig || {
-              echo "ERROR: CONFIG_KSU_MANUAL_HOOK missing."
-              exit 1
-            }
-
-          grep -Fq \
-            'config KSU_SUSFS' \
-            kernel/Kconfig || {
-              echo "ERROR: CONFIG_KSU_SUSFS missing."
-              exit 1
-            }
-
-          # --------------------------------------------------------
-          # Required KSU symbols.
-          #
-          # Search entire KernelSU-Next kernel tree, not just one
-          # guessed source file.
-          # --------------------------------------------------------
-          require_symbol() {
-            local symbol="$1"
-
-            if ! grep -Rqs \
-                --include='*.c' \
-                --include='*.h' \
-                "${symbol}" \
-                kernel; then
-
-              echo
-              echo "ERROR: KernelSU-Next symbol not found:"
-              echo "${symbol}"
-              exit 1
-            fi
-
-            echo "[OK] ${symbol}"
-          }
-
-          require_symbol 'ksu_handle_sys_reboot'
-          require_symbol 'ksu_handle_execveat'
-          require_symbol 'ksu_handle_vfs_read'
-          require_symbol 'ksu_handle_stat'
-          require_symbol 'ksu_handle_setresuid'
-
-          # --------------------------------------------------------
-          # app_profile include structure
-          # --------------------------------------------------------
-          grep -Fq \
-            '#include "uapi/app_profile.h"' \
-            kernel/policy/app_profile.h || {
-
-            echo
-            echo "ERROR: Unexpected KernelSU app_profile.h layout."
-            exit 1
-          }
-
-          # Make top-level uapi reachable from kernel include paths.
-          #
-          # This is necessary because policy/app_profile.h contains:
-          #     #include "uapi/app_profile.h"
-          #
-          ln -sfn \
-            ../uapi \
-            kernel/uapi
-
+          # policy/app_profile.h includes uapi/app_profile.h.
+          ln -sfn ../uapi kernel/uapi
           test -f kernel/uapi/app_profile.h
 
-          cd ..
+          cd "${KROOT}"
 
-          # --------------------------------------------------------
-          # KernelSU driver symlink.
-          # --------------------------------------------------------
-          ln -s \
-            ../../KernelSU-Next/kernel \
-            drivers/kernelsu
+          # Preserve the complete KernelSU-Next repository while the
+          # kernel build sees its kernel/ subdirectory as drivers/kernelsu.
+          ln -s ../../KernelSU-Next/kernel drivers/kernelsu
 
           test -L drivers/kernelsu
           test -f drivers/kernelsu/Kbuild
           test -f drivers/kernelsu/Kconfig
 
-          # --------------------------------------------------------
-          # drivers/Makefile
-          # --------------------------------------------------------
-          if ! grep -Fqx \
-              'obj-$(CONFIG_KSU) += kernelsu/' \
-              drivers/Makefile; then
+          grep -Fqx \
+            'obj-$(CONFIG_KSU) += kernelsu/' \
+            drivers/Makefile || \
+            printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> drivers/Makefile
 
-            printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' \
-              >> drivers/Makefile
+          grep -Fqx \
+            'source "drivers/kernelsu/Kconfig"' \
+            drivers/Kconfig || \
+            printf '\nsource "drivers/kernelsu/Kconfig"\n' >> drivers/Kconfig
 
-          fi
+          echo "KernelSU-Next integration OK."
 
-          # --------------------------------------------------------
-          # drivers/Kconfig
-          # --------------------------------------------------------
-          if ! grep -Fqx \
-              'source "drivers/kernelsu/Kconfig"' \
-              drivers/Kconfig; then
-
-            printf '\nsource "drivers/kernelsu/Kconfig"\n' \
-              >> drivers/Kconfig
-
-          fi
-
-          echo
-          echo "KernelSU-Next integration: OK"
-
-
-      # ============================================================
-      # 6. Manual hooks
-      #
-      # Linux 4.14:
-      # CONFIG_KSU_MANUAL_HOOK=y
-      #
-      # No KPROBE hook.
-      # ============================================================
       - name: KernelSU-Next 4.14 manual hooks 적용
-
         shell: bash
-
         run: |
           set -euo pipefail
 
@@ -401,336 +223,302 @@ jobs:
 
           ROOT = Path(".")
 
-          def insert_into_function(
-              file_name,
-              function_pattern,
-              snippet,
-              symbol,
-          ):
-              path = ROOT / file_name
+          def add_after_includes(path: Path, block: str) -> None:
               text = path.read_text()
 
-              # --------------------------------------------------
-              # Already present
-              # --------------------------------------------------
-              if symbol in text:
-                  print(f"[OK] {file_name}: {symbol} already present")
+              if "ksu_handle_" in text:
                   return
 
-              match = re.search(
-                  function_pattern,
-                  text,
-                  flags=re.MULTILINE,
+              matches = list(
+                  re.finditer(r"^#include[^\n]*$", text, re.MULTILINE)
               )
 
-              if not match:
+              if not matches:
+                  print(f"[ERROR] include block not found: {path}")
+                  sys.exit(1)
+
+              pos = matches[-1].end()
+
+              path.write_text(
+                  text[:pos] + "\n" + block + text[pos:]
+              )
+
+          def insert_before_anchor(
+              path: Path,
+              function_pattern: str,
+              anchor_pattern: str,
+              block: str,
+              symbol: str,
+          ) -> None:
+              text = path.read_text()
+
+              if symbol in text:
+                  print(f"[OK] {path}: {symbol} already present")
+                  return
+
+              fn = re.search(function_pattern, text, re.MULTILINE | re.DOTALL)
+
+              if not fn:
+                  print(f"[ERROR] function not found: {path}")
+                  sys.exit(1)
+
+              anchor = re.search(
+                  anchor_pattern,
+                  text[fn.end():],
+                  re.MULTILINE | re.DOTALL,
+              )
+
+              if not anchor:
                   print(
-                      f"[ERROR] {file_name}: "
-                      f"target function not found"
+                      f"[ERROR] anchor not found for {symbol}: {path}"
                   )
                   sys.exit(1)
 
-              brace = text.find("{", match.end())
+              pos = fn.end() + anchor.start()
 
-              if brace == -1:
-                  print(
-                      f"[ERROR] {file_name}: "
-                      f"function opening brace not found"
-                  )
-                  sys.exit(1)
-
-              new_text = (
-                  text[:brace + 1]
-                  + "\n"
-                  + snippet
-                  + "\n"
-                  + text[brace + 1:]
+              path.write_text(
+                  text[:pos] + block + "\n" + text[pos:]
               )
-
-              path.write_text(new_text)
 
               if symbol not in path.read_text():
                   print(
-                      f"[ERROR] {file_name}: "
-                      f"insertion verification failed"
+                      f"[ERROR] insertion verification failed: "
+                      f"{path}: {symbol}"
                   )
                   sys.exit(1)
 
-              print(f"[PATCH] {file_name}: {symbol}")
+              print(f"[PATCH] {path}: {symbol}")
 
-
-          # --------------------------------------------------------
-          # kernel/reboot.c
-          # --------------------------------------------------------
-          reboot = r'''
+          # ============================================================
+          # fs/exec.c
+          #
+          # Official legacy manual-hook layout:
+          # call from do_execve() and compat_do_execve() before the
+          # do_execveat_common() call.
+          # ============================================================
+          exec_decl = r'''
           #ifdef CONFIG_KSU
-              {
-                  int ksu_ret = ksu_handle_sys_reboot(
-                      magic1,
-                      magic2,
-                      cmd,
-                      (void __user **)&arg
-                  );
-
-                  if (ksu_ret)
-                      return ksu_ret;
-              }
+          extern int ksu_handle_execveat(
+              int *fd,
+              struct filename **filename_ptr,
+              void *argv,
+              void *envp,
+              int *flags);
           #endif
           '''
 
+          exec_block = r'''
+          #ifdef CONFIG_KSU
+              ksu_handle_execveat(
+                  (int *)AT_FDCWD,
+                  &filename,
+                  &argv,
+                  &envp,
+                  0);
+          #endif
+          '''
+
+          exec_path = ROOT / "fs/exec.c"
+          add_after_includes(exec_path, exec_decl)
+
+          text = exec_path.read_text()
+
+          for name in ("do_execve", "compat_do_execve"):
+              fn = re.search(
+                  rf"(?m)^[^\n]*\b{name}\s*\([^;]*\)\s*\{{",
+                  text,
+                  re.MULTILINE | re.DOTALL,
+              )
+
+              if not fn:
+                  print(f"[ERROR] {name}() not found in fs/exec.c")
+                  sys.exit(1)
+
+              tail = text[fn.end():]
+
+              anchor = re.search(
+                  r"return\s+do_execveat_common\s*\(",
+                  tail,
+                  re.MULTILINE,
+              )
+
+              if not anchor:
+                  print(
+                      f"[ERROR] do_execveat_common() call not found "
+                      f"inside {name}()"
+                  )
+                  sys.exit(1)
+
+              section = tail[:anchor.start()]
+
+              if "ksu_handle_execveat(" not in section:
+                  pos = fn.end() + anchor.start()
+                  text = text[:pos] + exec_block + "\n" + text[pos:]
+
+          exec_path.write_text(text)
+
+          # ============================================================
+          # fs/open.c
+          # ============================================================
+          open_decl = r'''
+          #ifdef CONFIG_KSU
+          extern int ksu_handle_faccessat(
+              int *dfd,
+              const char __user **filename_user,
+              int *mode,
+              int *flags);
+          #endif
+          '''
+
+          open_block = r'''
+          #ifdef CONFIG_KSU
+              ksu_handle_faccessat(
+                  &dfd,
+                  &filename,
+                  &mode,
+                  NULL);
+          #endif
+          '''
+
+          open_path = ROOT / "fs/open.c"
+          add_after_includes(open_path, open_decl)
+          insert_before_anchor(
+              open_path,
+              r"SYSCALL_DEFINE3\s*\(\s*faccessat\b",
+              r"if\s*\(mode\s*&\s*~S_IRWXO\)",
+              open_block,
+              "ksu_handle_faccessat(",
+          )
+
+          # ============================================================
+          # fs/read_write.c
+          # ============================================================
+          read_decl = r'''
+          #ifdef CONFIG_KSU
+          extern bool ksu_vfs_read_hook __read_mostly;
+          extern __attribute__((cold)) int ksu_handle_sys_read(
+              unsigned int fd,
+              char __user **buf_ptr,
+              size_t *count_ptr);
+          #endif
+          '''
+
+          read_block = r'''
+          #ifdef CONFIG_KSU
+              if (unlikely(ksu_vfs_read_hook))
+                  ksu_handle_sys_read(
+                      fd,
+                      &buf,
+                      &count);
+          #endif
+          '''
+
+          read_path = ROOT / "fs/read_write.c"
+          add_after_includes(read_path, read_decl)
+          insert_before_anchor(
+              read_path,
+              r"SYSCALL_DEFINE3\s*\(\s*read\b",
+              r"if\s*\(f\.file\)",
+              read_block,
+              "ksu_handle_sys_read(",
+          )
+
+          # ============================================================
+          # fs/stat.c
+          # ============================================================
+          stat_decl = r'''
+          #ifdef CONFIG_KSU
+          extern int ksu_handle_stat(
+              int *dfd,
+              const char __user **filename_user,
+              int *flags);
+          #endif
+          '''
+
+          stat_block = r'''
+          #ifdef CONFIG_KSU
+              ksu_handle_stat(
+                  &dfd,
+                  &filename,
+                  &flag);
+          #endif
+          '''
+
+          stat_path = ROOT / "fs/stat.c"
+          add_after_includes(stat_path, stat_decl)
+          insert_before_anchor(
+              stat_path,
+              r"SYSCALL_DEFINE4\s*\(\s*newfstatat\b",
+              r"error\s*=\s*vfs_fstatat",
+              stat_block,
+              "ksu_handle_stat(",
+          )
+
+          # ============================================================
+          # kernel/reboot.c
+          # ============================================================
           reboot_decl = r'''
           #ifdef CONFIG_KSU
           extern int ksu_handle_sys_reboot(
               int magic1,
               int magic2,
               unsigned int cmd,
-              void __user **arg
-          );
+              void __user **arg);
           #endif
           '''
 
-          p = ROOT / "kernel/reboot.c"
-          text = p.read_text()
+          reboot_block = r'''
+          #ifdef CONFIG_KSU
+              ksu_handle_sys_reboot(
+                  magic1,
+                  magic2,
+                  cmd,
+                  &arg);
+          #endif
+          '''
 
-          if "ksu_handle_sys_reboot" not in text:
-
-              matches = list(
-                  re.finditer(
-                      r"^#include .*?$",
-                      text,
-                      re.MULTILINE,
-                  )
-              )
-
-              if not matches:
-                  print(
-                      "[ERROR] kernel/reboot.c: "
-                      "include section not found"
-                  )
-                  sys.exit(1)
-
-              pos = matches[-1].end()
-
-              text = (
-                  text[:pos]
-                  + "\n"
-                  + reboot_decl
-                  + text[pos:]
-              )
-
-              p.write_text(text)
-
-          insert_into_function(
-              "kernel/reboot.c",
+          reboot_path = ROOT / "kernel/reboot.c"
+          add_after_includes(reboot_path, reboot_decl)
+          insert_before_anchor(
+              reboot_path,
               r"SYSCALL_DEFINE4\s*\(\s*reboot\b",
-              reboot,
-              "ksu_handle_sys_reboot",
+              r"/\*\s*We only trust the superuser with rebooting",
+              reboot_block,
+              "ksu_handle_sys_reboot(",
           )
 
-
-          # --------------------------------------------------------
-          # fs/exec.c
-          # --------------------------------------------------------
-          exec_hook = r'''
-          #ifdef CONFIG_KSU
-              extern bool ksu_execveat_hook __read_mostly;
-
-              extern int ksu_handle_execveat(
-                  int *fd,
-                  struct filename **filename_ptr,
-                  void *argv,
-                  void *envp,
-                  int *flags
-              );
-
-              extern int ksu_handle_execveat_sucompat(
-                  int *fd,
-                  struct filename **filename_ptr,
-                  void *argv,
-                  void *envp,
-                  int *flags
-              );
-
-              if (unlikely(ksu_execveat_hook))
-                  ksu_handle_execveat(
-                      &fd,
-                      &filename,
-                      &argv,
-                      &envp,
-                      &flags
-                  );
-              else
-                  ksu_handle_execveat_sucompat(
-                      &fd,
-                      &filename,
-                      &argv,
-                      &envp,
-                      &flags
-                  );
-          #endif
-          '''
-
-          insert_into_function(
-              "fs/exec.c",
-              r"\bdo_execveat_common\s*\(",
-              exec_hook,
-              "ksu_handle_execveat",
-          )
-
-
-          # --------------------------------------------------------
-          # fs/read_write.c
-          # --------------------------------------------------------
-          read_hook = r'''
-          #ifdef CONFIG_KSU
-              extern bool ksu_vfs_read_hook __read_mostly;
-
-              extern int ksu_handle_vfs_read(
-                  struct file **file_ptr,
-                  char __user **buf_ptr,
-                  size_t *count_ptr,
-                  loff_t **pos
-              );
-
-              if (unlikely(ksu_vfs_read_hook))
-                  ksu_handle_vfs_read(
-                      &file,
-                      &buf,
-                      &count,
-                      &pos
-                  );
-          #endif
-          '''
-
-          insert_into_function(
-              "fs/read_write.c",
-              r"\bssize_t\s+vfs_read\s*\(",
-              read_hook,
-              "ksu_handle_vfs_read",
-          )
-
-
-          # --------------------------------------------------------
-          # fs/stat.c
-          # --------------------------------------------------------
-          stat_hook = r'''
-          #ifdef CONFIG_KSU
-              extern int ksu_handle_stat(
-                  int *dfd,
-                  const char __user **filename_user,
-                  int *flags
-              );
-
-              ksu_handle_stat(
-                  &dfd,
-                  &filename,
-                  &flags
-              );
-          #endif
-          '''
-
-          insert_into_function(
-              "fs/stat.c",
-              r"\bint\s+vfs_statx\s*\(",
-              stat_hook,
-              "ksu_handle_stat",
-          )
-
-
-          # --------------------------------------------------------
-          # kernel/sys.c
-          # --------------------------------------------------------
-          setuid_hook = r'''
-          #ifdef CONFIG_KSU
-              extern int ksu_handle_setresuid(
-                  uid_t ruid,
-                  uid_t euid,
-                  uid_t suid
-              );
-
-              ksu_handle_setresuid(
-                  ruid,
-                  euid,
-                  suid
-              );
-          #endif
-          '''
-
-          insert_into_function(
-              "kernel/sys.c",
-              r"SYSCALL_DEFINE3\s*\(\s*setresuid\b",
-              setuid_hook,
-              "ksu_handle_setresuid",
-          )
-
-
-          # --------------------------------------------------------
-          # Final hook verification.
-          # --------------------------------------------------------
-          checks = {
-              "kernel/reboot.c": [
-                  "ksu_handle_sys_reboot",
-              ],
-              "fs/exec.c": [
-                  "ksu_handle_execveat",
-              ],
-              "fs/read_write.c": [
-                  "ksu_handle_vfs_read",
-              ],
-              "fs/stat.c": [
-                  "ksu_handle_stat",
-              ],
-              "kernel/sys.c": [
-                  "ksu_handle_setresuid",
-              ],
+          # Final source checks.
+          required = {
+              "fs/exec.c": ["ksu_handle_execveat("],
+              "fs/open.c": ["ksu_handle_faccessat("],
+              "fs/read_write.c": ["ksu_handle_sys_read("],
+              "fs/stat.c": ["ksu_handle_stat("],
+              "kernel/reboot.c": ["ksu_handle_sys_reboot("],
           }
 
-          for file_name, symbols in checks.items():
-
-              text = (ROOT / file_name).read_text()
-
+          for filename, symbols in required.items():
+              text = (ROOT / filename).read_text()
               for symbol in symbols:
-
                   if symbol not in text:
                       print(
-                          f"[ERROR] Hook verification failed: "
-                          f"{file_name}: {symbol}"
+                          f"[ERROR] Manual hook missing: "
+                          f"{filename}: {symbol}"
                       )
                       sys.exit(1)
 
-          print()
-          print("==================================================")
-          print("KernelSU manual hook integration: OK")
-          print("==================================================")
+          print("KernelSU-Next manual hook integration OK.")
           PY
 
-
-      # ============================================================
-      # 7. SUSFS 4.14
-      #
-      # Do NOT apply 10_enable_susfs_for_ksu.patch.
-      # KernelSU-Next legacy-susfs-v2 already contains KSU-side
-      # SUSFS support.
-      #
-      # Only integrate the kernel-side SUSFS 4.14 patch set here.
-      # ============================================================
       - name: SUSFS 4.14 통합
-
         shell: bash
-
         run: |
           set -euo pipefail
 
-          cd "${GITHUB_WORKSPACE}/kernel_workspace/private/msm-google"
+          KROOT="${GITHUB_WORKSPACE}/kernel_workspace/private/msm-google"
+
+          cd "${KROOT}"
 
           rm -rf SUSFS
-
-          echo
-          echo "=================================================="
-          echo "SUSFS"
-          echo "Repository: ${SUSFS_REPO}"
-          echo "Branch:     ${SUSFS_REF}"
-          echo "=================================================="
 
           git clone \
             --depth=1 \
@@ -742,175 +530,125 @@ jobs:
 
           SUSFS_COMMIT="$(git rev-parse HEAD)"
 
-          echo "SUSFS commit:"
-          echo "${SUSFS_COMMIT}"
+          echo "SUSFS commit: ${SUSFS_COMMIT}"
 
-          test -f \
-            kernel_patches/50_add_susfs_in_kernel-4.14.patch
+          test -f kernel_patches/50_add_susfs_in_kernel-4.14.patch
+          test -f kernel_patches/fs/susfs.c
+          test -f kernel_patches/include/linux/susfs.h
 
-          test -f \
-            kernel_patches/fs/susfs.c
+          cd "${KROOT}"
 
-          test -f \
-            kernel_patches/include/linux/susfs.h
+          # Do NOT apply 10_enable_susfs_for_ksu.patch here.
+          # KernelSU-Next is already a SUSFS-integrated legacy tree.
 
-          cd ..
-
-          # --------------------------------------------------------
-          # Copy actual SUSFS source files.
-          # --------------------------------------------------------
-          rsync \
-            -a \
+          rsync -a \
             SUSFS/kernel_patches/fs/ \
             fs/
 
-          rsync \
-            -a \
+          rsync -a \
             SUSFS/kernel_patches/include/linux/ \
             include/linux/
 
-          # --------------------------------------------------------
-          # Apply exact kernel-4.14 patch.
-          #
-          # Do NOT silently ignore rejection.
-          # --------------------------------------------------------
+          # Fail closed on any incompatible hunk.
           git apply \
             --check \
             SUSFS/kernel_patches/50_add_susfs_in_kernel-4.14.patch
 
           git apply \
-            --index \
             SUSFS/kernel_patches/50_add_susfs_in_kernel-4.14.patch
 
-          # --------------------------------------------------------
-          # Verify.
-          # --------------------------------------------------------
           test -f fs/susfs.c
           test -f include/linux/susfs.h
 
           grep -Fq \
             'obj-$(CONFIG_KSU_SUSFS) += susfs.o' \
-            fs/Makefile || {
+            fs/Makefile
 
-            echo
-            echo "ERROR: SUSFS was not wired into fs/Makefile."
-            exit 1
-          }
+          echo "SUSFS kernel-side integration OK."
 
-          grep -Fq \
-            'susfs_' \
-            fs/susfs.c
-
-          echo
-          echo "SUSFS integration: OK"
-
-
-      # ============================================================
-      # 8. NoMount
-      # ============================================================
-      - name: NoMount 통합
-
+      - name: SUSFS-KernelSU ABI 사전검사
         shell: bash
-
         run: |
           set -euo pipefail
 
-          cd "${GITHUB_WORKSPACE}/kernel_workspace/private/msm-google"
+          KROOT="${GITHUB_WORKSPACE}/kernel_workspace/private/msm-google"
+
+          cd "${KROOT}"
+
+          # The selected KernelSU-Next d999a2af tree uses newer SUSFS-side
+          # helpers. The simonpunk kernel-4.14 tree is an older SUSFS tree.
+          # Detect this mismatch before the compiler produces opaque errors.
+          if grep -Rqs 'susfs_extra_works' KernelSU-Next/kernel && \
+             ! grep -Rqs 'susfs_extra_works' fs include/linux; then
+
+            echo
+            echo "=================================================="
+            echo "ERROR: KernelSU-Next / SUSFS ABI mismatch"
+            echo "=================================================="
+            echo "KernelSU-Next ${KSUN_REF} expects susfs_extra_works,"
+            echo "but the selected SUSFS ${SUSFS_REF} tree does not provide it."
+            echo
+            echo "Do not bypass this error with '|| true'."
+            echo "A compatible legacy SUSFS v2.x 4.14 source/patch set"
+            echo "must be selected before building."
+            echo "=================================================="
+            exit 1
+          fi
+
+          echo "KernelSU-Next / SUSFS ABI preflight: OK."
+
+      - name: NoMount 통합
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          KROOT="${GITHUB_WORKSPACE}/kernel_workspace/private/msm-google"
+
+          cd "${KROOT}"
 
           rm -rf NoMount
 
-          echo
-          echo "=================================================="
-          echo "NoMount"
-          echo "Repository: ${NOMOUNT_REPO}"
-          echo "Ref:        ${NOMOUNT_REF}"
-          echo "=================================================="
-
           git clone \
-            --filter=blob:none \
+            --depth=1 \
+            --branch "${NOMOUNT_REF}" \
             "${NOMOUNT_REPO}" \
             NoMount
 
           cd NoMount
 
-          git fetch \
-            --depth=1 \
-            origin \
-            "${NOMOUNT_REF}"
-
-          git checkout \
-            --detach \
-            FETCH_HEAD
-
           NOMOUNT_COMMIT="$(git rev-parse HEAD)"
 
-          echo "NoMount commit:"
-          echo "${NOMOUNT_COMMIT}"
+          echo "NoMount commit: ${NOMOUNT_COMMIT}"
 
           test -d kernel/src
+          test -f kernel/README.md
 
-          cd ..
+          cd "${KROOT}"
 
           rm -rf fs/nomount
-
           mkdir -p fs/nomount
 
-          rsync \
-            -a \
+          rsync -a \
             NoMount/kernel/src/ \
             fs/nomount/
 
-          # --------------------------------------------------------
-          # fs/Kconfig
-          # --------------------------------------------------------
-          if ! grep -Fqx \
-              'source "fs/nomount/Kconfig"' \
-              fs/Kconfig; then
+          grep -Fqx \
+            'source "fs/nomount/Kconfig"' \
+            fs/Kconfig || \
+            printf '\nsource "fs/nomount/Kconfig"\n' >> fs/Kconfig
 
-            printf '\nsource "fs/nomount/Kconfig"\n' \
-              >> fs/Kconfig
+          grep -Fqx \
+            'obj-$(CONFIG_NOMOUNT) += nomount/' \
+            fs/Makefile || \
+            printf '\nobj-$(CONFIG_NOMOUNT) += nomount/\n' >> fs/Makefile
 
-          fi
-
-          # --------------------------------------------------------
-          # fs/Makefile
-          # --------------------------------------------------------
-          if ! grep -Fqx \
-              'obj-$(CONFIG_NOMOUNT) += nomount/' \
-              fs/Makefile; then
-
-            printf '\nobj-$(CONFIG_NOMOUNT) += nomount/\n' \
-              >> fs/Makefile
-
-          fi
-
-          # --------------------------------------------------------
-          # Verify NoMount config.
-          # --------------------------------------------------------
           test -f fs/nomount/Kconfig
+          grep -Fq 'config NOMOUNT' fs/nomount/Kconfig
 
-          grep -Fq \
-            'config NOMOUNT' \
-            fs/nomount/Kconfig || {
+          echo "NoMount integration OK."
 
-            echo
-            echo "ERROR: CONFIG_NOMOUNT definition was not found."
-            exit 1
-          }
-
-          echo
-          echo "NoMount integration: OK"
-
-
-      # ============================================================
-      # 9. Defconfig
-      #
-      # Do not blindly append duplicate entries.
-      # ============================================================
-      - name: Sunfish defconfig 구성
-
+      - name: Sunfish defconfig 설정
         shell: bash
-
         run: |
           set -euo pipefail
 
@@ -921,7 +659,6 @@ jobs:
           test -f "${DEFCONFIG}"
 
           remove_config() {
-
             local key="$1"
 
             sed -i \
@@ -930,8 +667,7 @@ jobs:
               "${DEFCONFIG}"
           }
 
-          set_config() {
-
+          set_bool() {
             local key="$1"
             local value="$2"
 
@@ -943,8 +679,7 @@ jobs:
               >> "${DEFCONFIG}"
           }
 
-          disable_config() {
-
+          disable_bool() {
             local key="$1"
 
             remove_config "${key}"
@@ -954,77 +689,44 @@ jobs:
               >> "${DEFCONFIG}"
           }
 
+          # Linux 4.14: Manual Hook.
+          set_bool KSU y
+          set_bool KSU_MANUAL_HOOK y
 
-          # --------------------------------------------------------
-          # KernelSU
-          # --------------------------------------------------------
-          set_config KSU y
+          disable_bool KSU_KPROBES_HOOK
+          disable_bool KSU_SYSCALL_TABLE_HOOK
 
-          set_config KSU_MANUAL_HOOK y
+          # SUSFS options actually present in the selected legacy tree.
+          set_bool KSU_SUSFS y
+          set_bool KSU_SUSFS_SUS_PATH y
+          set_bool KSU_SUSFS_SUS_MOUNT y
+          set_bool KSU_SUSFS_SUS_KSTAT y
+          set_bool KSU_SUSFS_TRY_UMOUNT y
+          set_bool KSU_SUSFS_SPOOF_UNAME y
+          set_bool KSU_SUSFS_ENABLE_LOG y
+          set_bool KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS y
+          set_bool KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG y
+          set_bool KSU_SUSFS_OPEN_REDIRECT y
 
-          disable_config KSU_KPROBES_HOOK
-          disable_config KSU_SYSCALL_TABLE_HOOK
+          # These newer SUSFS features are disabled because the selected
+          # kernel-4.14 SUSFS tree does not provide their v2.x code.
+          disable_bool KSU_SUSFS_SUS_MAP
+          disable_bool KSU_SUSFS_SUS_MEMFD
 
+          set_bool OVERLAY_FS y
 
-          # --------------------------------------------------------
-          # SUSFS
-          #
-          # Use only symbols that actually exist in legacy-susfs-v2.
-          # --------------------------------------------------------
-          set_config KSU_SUSFS y
+          set_bool NOMOUNT y
 
-          set_config KSU_SUSFS_SUS_PATH y
-          set_config KSU_SUSFS_SUS_MOUNT y
-          set_config KSU_SUSFS_SUS_KSTAT y
-          set_config KSU_SUSFS_TRY_UMOUNT y
+          set_bool TCP_CONG_ADVANCED y
+          set_bool TCP_CONG_BBR y
 
-          set_config KSU_SUSFS_SPOOF_UNAME y
-          set_config KSU_SUSFS_ENABLE_LOG n
-          set_config KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS y
-          set_config KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG y
-          set_config KSU_SUSFS_OPEN_REDIRECT y
-          set_config KSU_SUSFS_SUS_MAP y
+          remove_config DEFAULT_TCP_CONG
+          printf 'CONFIG_DEFAULT_TCP_CONG="bbr"\n' >> "${DEFCONFIG}"
 
+          echo "Sunfish defconfig configured."
 
-          # --------------------------------------------------------
-          # OverlayFS
-          # --------------------------------------------------------
-          set_config OVERLAY_FS y
-
-
-          # --------------------------------------------------------
-          # NoMount
-          # --------------------------------------------------------
-          set_config NOMOUNT y
-
-
-          # --------------------------------------------------------
-          # BBR
-          # --------------------------------------------------------
-          set_config TCP_CONG_ADVANCED y
-          set_config TCP_CONG_BBR y
-          set_config DEFAULT_TCP_CONG '"bbr"'
-
-
-          echo
-          echo "=================================================="
-          echo "Sunfish requested configuration"
-          echo "=================================================="
-
-          grep -E \
-            '^(CONFIG_(KSU|KSU_MANUAL_HOOK|KSU_KPROBES_HOOK|KSU_SYSCALL_TABLE_HOOK|KSU_SUSFS|KSU_SUSFS_SUS_PATH|KSU_SUSFS_SUS_MOUNT|KSU_SUSFS_SUS_KSTAT|KSU_SUSFS_TRY_UMOUNT|KSU_SUSFS_SPOOF_UNAME|KSU_SUSFS_ENABLE_LOG|KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS|KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG|KSU_SUSFS_OPEN_REDIRECT|KSU_SUSFS_SUS_MAP|OVERLAY_FS|NOMOUNT|TCP_CONG_ADVANCED|TCP_CONG_BBR|DEFAULT_TCP_CONG))|^# CONFIG_(KSU_KPROBES_HOOK|KSU_SYSCALL_TABLE_HOOK) is not set' \
-            "${DEFCONFIG}" || true
-
-
-      # ============================================================
-      # 10. Custom build config
-      #
-      # Don't modify Google's entire build system.
-      # ============================================================
-      - name: Custom build.config 생성
-
+      - name: Google build config 복사
         shell: bash
-
         run: |
           set -euo pipefail
 
@@ -1036,30 +738,15 @@ jobs:
 
           cat >> build.config.sunfish.custom <<'EOF'
 
-          # ========================================================
-          # Pixel 4a custom build
-          # ========================================================
-
+          # Custom KernelSU-Next / SUSFS / NoMount build.
           POST_DEFCONFIG_CMDS=""
-
-          # Google check_defconfig must not reject the intentionally
-          # modified sunfish configuration.
           SKIP_DEFCONFIG_CHECK=1
           EOF
 
-          echo
-          echo "===== build.config.sunfish.custom ====="
+          test -f build.config.sunfish.custom
 
-          cat build.config.sunfish.custom
-
-
-      # ============================================================
-      # 11. Kernel build
-      # ============================================================
       - name: 커널 빌드
-
         shell: bash
-
         run: |
           set -euo pipefail
 
@@ -1070,47 +757,28 @@ jobs:
           export POST_DEFCONFIG_CMDS=""
           export SKIP_DEFCONFIG_CHECK=1
 
-          echo
-          echo "=================================================="
-          echo "Starting Pixel 4a Sunfish kernel build"
-          echo "=================================================="
-
           set -o pipefail
 
           LTO=thin \
           BUILD_CONFIG=private/msm-google/build.config.sunfish.custom \
           ./build/build.sh \
-            2>&1 \
-            | tee "${GITHUB_WORKSPACE}/kernel-build.log"
+            2>&1 | tee "${GITHUB_WORKSPACE}/kernel-build.log"
 
-
-      # ============================================================
-      # 12. Verify KSU / SUSFS / NoMount / BBR
-      # ============================================================
-      - name: 빌드 결과 및 설정 검증
-
+      - name: 빌드 결과 검증
         shell: bash
-
         run: |
           set -euo pipefail
 
           KROOT="${GITHUB_WORKSPACE}/kernel_workspace/private/msm-google"
-
           OUT="${GITHUB_WORKSPACE}/kernel_workspace/out"
-
           LOG="${GITHUB_WORKSPACE}/kernel-build.log"
 
           cd "${KROOT}"
 
-
-          # --------------------------------------------------------
-          # KSU fallback detection
-          # --------------------------------------------------------
           if grep -Eq \
               'KSU_GIT_VERSION not defined|KSU_VERSION_TAG not defined|KernelSU-Next version fallback|KernelSU-Next tag fallback' \
               "${LOG}"; then
 
-            echo
             echo "ERROR: KernelSU-Next Git metadata fallback detected."
 
             grep -E \
@@ -1120,10 +788,6 @@ jobs:
             exit 1
           fi
 
-
-          # --------------------------------------------------------
-          # Find final .config
-          # --------------------------------------------------------
           CONFIG_FILE="$(
             find "${OUT}" \
               -type f \
@@ -1131,162 +795,70 @@ jobs:
               | head -n 1
           )"
 
-          if [ -z "${CONFIG_FILE}" ]; then
-
-            echo
-            echo "ERROR: Final .config was not found."
-
-            exit 1
-
-          fi
-
-
-          echo
-          echo "Final config:"
-          echo "${CONFIG_FILE}"
-
+          test -n "${CONFIG_FILE}"
 
           require_yes() {
-
             local key="$1"
 
-            if ! grep -q \
-                "^${key}=y$" \
-                "${CONFIG_FILE}"; then
-
-              echo
-              echo "ERROR: ${key}=y is missing."
-
-              grep \
-                -E \
-                "^${key}=|^# ${key} is not set" \
-                "${CONFIG_FILE}" || true
-
+            grep -q "^${key}=y$" "${CONFIG_FILE}" || {
+              echo "ERROR: ${key}=y missing"
               exit 1
-            fi
+            }
           }
-
 
           require_not_y() {
-
             local key="$1"
 
-            if grep -q \
-                "^${key}=y$" \
-                "${CONFIG_FILE}"; then
-
-              echo
-              echo "ERROR: ${key}=y must not be enabled."
-
+            ! grep -q "^${key}=y$" "${CONFIG_FILE}" || {
+              echo "ERROR: ${key}=y must be disabled"
               exit 1
-            fi
+            }
           }
 
-
-          # KernelSU
           require_yes CONFIG_KSU
           require_yes CONFIG_KSU_MANUAL_HOOK
 
           require_not_y CONFIG_KSU_KPROBES_HOOK
           require_not_y CONFIG_KSU_SYSCALL_TABLE_HOOK
 
-
-          # SUSFS
           require_yes CONFIG_KSU_SUSFS
           require_yes CONFIG_KSU_SUSFS_SUS_PATH
           require_yes CONFIG_KSU_SUSFS_SUS_MOUNT
           require_yes CONFIG_KSU_SUSFS_SUS_KSTAT
           require_yes CONFIG_KSU_SUSFS_TRY_UMOUNT
+          require_yes CONFIG_KSU_SUSFS_SPOOF_UNAME
+          require_yes CONFIG_KSU_SUSFS_ENABLE_LOG
+          require_yes CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS
+          require_yes CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG
+          require_yes CONFIG_KSU_SUSFS_OPEN_REDIRECT
 
+          require_not_y CONFIG_KSU_SUSFS_SUS_MAP
+          require_not_y CONFIG_KSU_SUSFS_SUS_MEMFD
 
-          # OverlayFS
           require_yes CONFIG_OVERLAY_FS
-
-
-          # NoMount
           require_yes CONFIG_NOMOUNT
 
-
-          # BBR
           require_yes CONFIG_TCP_CONG_ADVANCED
           require_yes CONFIG_TCP_CONG_BBR
 
-
-          grep -q \
-            '^CONFIG_DEFAULT_TCP_CONG="bbr"$' \
-            "${CONFIG_FILE}" || {
-
-            echo
-            echo "ERROR: BBR is not default TCP congestion control."
-
+          grep -q '^CONFIG_DEFAULT_TCP_CONG="bbr"$' "${CONFIG_FILE}" || {
+            echo "ERROR: BBR is not the default TCP congestion control."
             exit 1
           }
 
-
-          # --------------------------------------------------------
-          # Source hooks
-          # --------------------------------------------------------
-          grep -q \
-            'ksu_handle_sys_reboot' \
-            kernel/reboot.c
-
-          grep -q \
-            'ksu_handle_execveat' \
-            fs/exec.c
-
-          grep -q \
-            'ksu_handle_vfs_read' \
-            fs/read_write.c
-
-          grep -q \
-            'ksu_handle_stat' \
-            fs/stat.c
-
-          grep -q \
-            'ksu_handle_setresuid' \
-            kernel/sys.c
-
-
-          # --------------------------------------------------------
-          # KernelSU source
-          # --------------------------------------------------------
           test -L drivers/kernelsu
-
           test -f drivers/kernelsu/Kbuild
           test -f drivers/kernelsu/Kconfig
-
           test -f drivers/kernelsu/uapi/app_profile.h
 
-
-          # --------------------------------------------------------
-          # SUSFS
-          # --------------------------------------------------------
           test -f fs/susfs.c
           test -f include/linux/susfs.h
+          grep -Fq 'obj-$(CONFIG_KSU_SUSFS) += susfs.o' fs/Makefile
 
-          grep -Fq \
-            'obj-$(CONFIG_KSU_SUSFS) += susfs.o' \
-            fs/Makefile
-
-
-          # --------------------------------------------------------
-          # NoMount
-          # --------------------------------------------------------
           test -f fs/nomount/Kconfig
-          test -d fs/nomount
+          grep -Fq 'source "fs/nomount/Kconfig"' fs/Kconfig
+          grep -Fq 'obj-$(CONFIG_NOMOUNT) += nomount/' fs/Makefile
 
-          grep -Fq \
-            'source "fs/nomount/Kconfig"' \
-            fs/Kconfig
-
-          grep -Fq \
-            'obj-$(CONFIG_NOMOUNT) += nomount/' \
-            fs/Makefile
-
-
-          # --------------------------------------------------------
-          # Find kernel image
-          # --------------------------------------------------------
           IMAGE="$(
             find "${OUT}" \
               -type f \
@@ -1295,26 +867,12 @@ jobs:
               | head -n 1
           )"
 
-
           if [ -z "${IMAGE}" ]; then
-
-            echo
             echo "ERROR: Image.lz4-dtb was not produced."
-
-            find "${OUT}" \
-              -type f \
-              | sort \
-              | grep -E \
-                '/(Image|Image\..*|vmlinux|System\.map)$' \
-              | tail -100 || true
-
+            find "${OUT}" -type f | sort | tail -200
             exit 1
           fi
 
-
-          # --------------------------------------------------------
-          # Metadata
-          # --------------------------------------------------------
           KERNEL_VERSION="$(make -s kernelversion)"
 
           {
@@ -1323,43 +881,26 @@ jobs:
             echo "KERNEL_BRANCH=${KERNEL_BRANCH}"
             echo "KERNEL_VERSION=${KERNEL_VERSION}"
             echo "KSUN_REPO=${KSUN_REPO}"
-            echo "KSUN_COMMIT=${KSUN_COMMIT:-${KSUN_REF}}"
+            echo "KSUN_REF=${KSUN_REF}"
+            echo "KSUN_COMMIT=$(git -C KernelSU-Next rev-parse HEAD)"
             echo "SUSFS_REPO=${SUSFS_REPO}"
             echo "SUSFS_REF=${SUSFS_REF}"
-            echo "SUSFS_COMMIT=${SUSFS_COMMIT:-unknown}"
+            echo "SUSFS_COMMIT=$(git -C SUSFS rev-parse HEAD)"
             echo "NOMOUNT_REPO=${NOMOUNT_REPO}"
             echo "NOMOUNT_REF=${NOMOUNT_REF}"
-            echo "NOMOUNT_COMMIT=${NOMOUNT_COMMIT:-unknown}"
+            echo "NOMOUNT_COMMIT=$(git -C NoMount rev-parse HEAD)"
             echo "BUILD_DATE=$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
             echo "IMAGE=${IMAGE}"
           } > "${GITHUB_WORKSPACE}/BUILD_INFO.txt"
 
+          sha256sum "${IMAGE}" > "${GITHUB_WORKSPACE}/KERNEL_SHA256SUM.txt"
 
-          sha256sum \
-            "${IMAGE}" \
-            > "${GITHUB_WORKSPACE}/KERNEL_SHA256SUM.txt"
-
-
-          echo
-          echo "=================================================="
           echo "BUILD VERIFICATION: PASS"
-          echo "=================================================="
-
-          echo
-          echo "Kernel:"
-          echo "${IMAGE}"
-
-          echo
+          echo "IMAGE=${IMAGE}"
           sha256sum "${IMAGE}"
 
-
-      # ============================================================
-      # 13. AnyKernel3
-      # ============================================================
       - name: AnyKernel3 패키징
-
         shell: bash
-
         run: |
           set -euo pipefail
 
@@ -1375,16 +916,6 @@ jobs:
 
           cd AnyKernel3
 
-          ANYKERNEL3_COMMIT="$(git rev-parse HEAD)"
-
-          echo
-          echo "AnyKernel3:"
-          echo "${ANYKERNEL3_COMMIT}"
-
-
-          # --------------------------------------------------------
-          # Locate kernel image
-          # --------------------------------------------------------
           IMAGE="$(
             find \
               "${GITHUB_WORKSPACE}/kernel_workspace/out" \
@@ -1394,38 +925,18 @@ jobs:
               | head -n 1
           )"
 
+          test -n "${IMAGE}"
 
-          if [ -z "${IMAGE}" ]; then
-            echo "ERROR: Image.lz4-dtb not found."
-            exit 1
-          fi
+          cp "${IMAGE}" Image.lz4-dtb
 
-
-          cp \
-            "${IMAGE}" \
-            Image.lz4-dtb
-
-
-          # --------------------------------------------------------
-          # Pixel 4a device
-          # --------------------------------------------------------
           if grep -q '^device.name1=' anykernel.sh; then
-
             sed -i \
               's/^device\.name1=.*/device.name1=sunfish/' \
               anykernel.sh
-
           else
-
-            printf '\ndevice.name1=sunfish\n' \
-              >> anykernel.sh
-
+            printf '\ndevice.name1=sunfish\n' >> anykernel.sh
           fi
 
-
-          # --------------------------------------------------------
-          # Build info
-          # --------------------------------------------------------
           cp \
             "${GITHUB_WORKSPACE}/BUILD_INFO.txt" \
             BUILD_INFO.txt
@@ -1434,66 +945,35 @@ jobs:
             "${GITHUB_WORKSPACE}/KERNEL_SHA256SUM.txt" \
             KERNEL_SHA256SUM.txt
 
-          printf '\nANYKERNEL3_COMMIT=%s\n' \
-            "${ANYKERNEL3_COMMIT}" \
-            >> BUILD_INFO.txt
-
-
           test -f Image.lz4-dtb
 
-
-          # --------------------------------------------------------
-          # Flashable ZIP
-          # --------------------------------------------------------
           cd "${GITHUB_WORKSPACE}"
 
-          rm -f \
-            Sunfish-KernelSU-Next-SUSFS-NoMount-BBR.zip
+          rm -f Sunfish-KernelSU-Next-SUSFS-NoMount-BBR.zip
 
           cd AnyKernel3
 
-          zip \
-            -r9 \
+          zip -r9 \
             "${GITHUB_WORKSPACE}/Sunfish-KernelSU-Next-SUSFS-NoMount-BBR.zip" \
             . \
             -x ".git/*" \
             -x "README.md"
 
-
-      # ============================================================
-      # 14. Upload kernel
-      # ============================================================
-      - name: 커널 ZIP 업로드
-
+      - name: 최종 Artifact 업로드
         uses: actions/upload-artifact@v4
-
         with:
           name: Sunfish-KernelSU-Next-SUSFS-NoMount-BBR
-
-          path: |
-            Sunfish-KernelSU-Next-SUSFS-NoMount-BBR.zip
-
+          path: Sunfish-KernelSU-Next-SUSFS-NoMount-BBR.zip
           if-no-files-found: error
-
           retention-days: 30
 
-
-      # ============================================================
-      # 15. Upload diagnostics
-      # ============================================================
-      - name: 빌드 로그 업로드
-
+      - name: 빌드 진단정보 업로드
         uses: actions/upload-artifact@v4
-
         with:
           name: Sunfish-Kernel-Build-Diagnostics
-
           path: |
             kernel-build.log
             BUILD_INFO.txt
             KERNEL_SHA256SUM.txt
-
           if-no-files-found: error
-
           retention-days: 30
-```
