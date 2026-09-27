@@ -24,6 +24,9 @@ env:
   ANYKERNEL3_REPO: https://github.com/osm0sis/AnyKernel3.git
   ANYKERNEL3_REF: master
 
+  # Fix Kbuild check during make mrproper/clean phase
+  CONFIG_KSU_MANUAL_HOOK: "y"
+
 jobs:
   build:
     runs-on: ubuntu-22.04
@@ -190,6 +193,9 @@ jobs:
           mkdir -p drivers/kernelsu/policy
           cp -r KernelSU-Next/uapi drivers/kernelsu/policy/uapi
           cp -r KernelSU-Next/.git drivers/kernelsu/.git
+
+          # Prevent Kbuild error during mrproper/clean phase before .config is loaded
+          sed -i '1i CONFIG_KSU_MANUAL_HOOK ?= y' drivers/kernelsu/Kbuild
 
           test -d drivers/kernelsu
           test -f drivers/kernelsu/Kbuild
@@ -852,6 +858,7 @@ jobs:
 
           export POST_DEFCONFIG_CMDS=""
           export SKIP_DEFCONFIG_CHECK=1
+          export CONFIG_KSU_MANUAL_HOOK=y
 
           set -o pipefail
 
