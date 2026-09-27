@@ -618,26 +618,61 @@ jobs:
           # Clean up any rej or orig files
           find . -name "*.rej" -o -name "*.orig" | xargs rm -f || true
 
-          # Inject susfs_extra_works stub if missing to satisfy KernelSU-Next ABI requirement
+          # KernelSU-Next(${KSUN_REF}, tag ${KSU_VERSION_TAG})는
+          # "legacy-susfs" 계열 SUSFS API를 기대하고 만들어졌지만, 이
+          # 워크플로가 실제로 받아오는 SUSFS_REPO/SUSFS_REF
+          # (simonpunk/susfs4ksu.git, 브랜치 kernel-4.14)는 고정 커밋이
+          # 아닌 흘러가는 브랜치라서, 두 트리의 API 버전이 어긋날 수
+          # 있다. 실제로 아래 심볼 하나가 이 조합에서 누락되어 있었다:
+          #
+          #   drivers/kernelsu/hook/setuid_hook.c:190:5: error:
+          #   implicit declaration of function
+          #   'susfs_set_current_proc_umounted'
+          #
+          # (2026-09-27 빌드 로그, logs_98344795171.zip 확인)
+          #
+          # 아래는 susfs_extra_works에 이미 쓰던 것과 동일한 "ABI FIX"
+          # 스텁 패턴을 재사용해 빌드가 통과하도록 만드는 임시 조치다.
+          # 주의: 이 스텁은 build-fix 용 no-op이며, SUSFS의 실제
+          # "umount된 프로세스에서 sus_mount 은닉" 동작을 수행하지
+          # 않는다. sus_path/sus_kstat/spoof_uname 등 다른 SUSFS 기능은
+          # 이 심볼과 무관하게 정상 동작한다. 장기적으로는
+          # SUSFS_REF를 KSUN_REF(v3.4.0-legacy-susfs-v2)와 실제로
+          # 짝이 맞는 고정 커밋으로 바꾸는 것이 올바른 해결책이다.
           python3 <<'PY'
           from pathlib import Path
 
           susfs_h = Path("include/linux/susfs.h")
           susfs_c = Path("fs/susfs.c")
 
-          if susfs_h.exists():
-              text_h = susfs_h.read_text()
-              if "susfs_extra_works" not in text_h:
-                  text_h += "\nextern void susfs_extra_works(void);\n"
-                  susfs_h.write_text(text_h)
-                  print("[ABI FIX] Added susfs_extra_works declaration to include/linux/susfs.h")
+          # (header declaration text, C definition text, marker to search for)
+          abi_stubs = [
+              (
+                  "susfs_extra_works",
+                  "extern void susfs_extra_works(void);\n",
+                  "void susfs_extra_works(void) {}\n",
+              ),
+              (
+                  "susfs_set_current_proc_umounted",
+                  "extern void susfs_set_current_proc_umounted(void);\n",
+                  "void susfs_set_current_proc_umounted(void) {}\n",
+              ),
+          ]
 
-          if susfs_c.exists():
+          if susfs_h.exists() and susfs_c.exists():
+              text_h = susfs_h.read_text()
               text_c = susfs_c.read_text()
-              if "susfs_extra_works" not in text_c:
-                  text_c += "\nvoid susfs_extra_works(void) {}\n"
-                  susfs_c.write_text(text_c)
-                  print("[ABI FIX] Added susfs_extra_works stub definition to fs/susfs.c")
+
+              for symbol, decl, defn in abi_stubs:
+                  if symbol not in text_h:
+                      text_h += f"\n{decl}"
+                      print(f"[ABI FIX] Added {symbol} declaration to include/linux/susfs.h")
+                  if symbol not in text_c:
+                      text_c += f"\n{defn}"
+                      print(f"[ABI FIX] Added {symbol} stub definition to fs/susfs.c")
+
+              susfs_h.write_text(text_h)
+              susfs_c.write_text(text_c)
           PY
 
           test -f fs/susfs.c
@@ -658,20 +693,61 @@ jobs:
 
           cd "${KROOT}"
 
-          if grep -Rqs 'susfs_extra_works' drivers/kernelsu && \
-             ! grep -Rqs 'susfs_extra_works' fs include/linux; then
+          # drivers/kernelsu(KernelSU-Next)가 호출하는 모든 susfs_* /
+          # ksu_susfs_* 식별자를 추출한 뒤, 커널 트리의 나머지 부분
+          # (fs, include/linux, kernel, security, mm 등: drivers/kernelsu
+          # 자기 자신은 제외)에 그 이름이 단 한 번도 등장하지 않으면
+          # "선언조차 안 된 심볼"로 간주해 빌드 전에 미리 실패시킨다.
+          #
+          # 이전 버전은 susfs_extra_works 딱 하나만 검사했는데, 실제로는
+          # susfs_set_current_proc_umounted 같은 *다른* 심볼이 누락되어
+          # 있어도 이 프리플라이트를 통과해버리고 20분짜리 빌드가 끝날
+          # 때쯤에야 실패하는 문제가 있었다 (logs_98344795171.zip 사례).
+          mapfile -t CALLED_SYMS < <(
+            grep -RhoE '\b(susfs|ksu_susfs)_[A-Za-z0-9_]+[[:space:]]*\(' \
+              drivers/kernelsu \
+              2>/dev/null \
+            | sed -E 's/[[:space:]]*\($//' \
+            | sort -u
+          )
 
+          MISSING=()
+
+          for sym in "${CALLED_SYMS[@]:-}"; do
+            [ -z "${sym}" ] && continue
+
+            if ! grep -RqE "\b${sym}\b" \
+                 --include='*.c' --include='*.h' \
+                 --exclude-dir=kernelsu \
+                 fs include/linux kernel security mm net drivers \
+                 2>/dev/null; then
+              MISSING+=("${sym}")
+            fi
+          done
+
+          if [ "${#MISSING[@]}" -gt 0 ]; then
             echo
             echo "=================================================="
             echo "ERROR: KernelSU-Next / SUSFS ABI mismatch"
             echo "=================================================="
-            echo "KernelSU-Next ${KSUN_REF} expects susfs_extra_works,"
-            echo "but the selected SUSFS ${SUSFS_REF} tree does not provide it."
+            echo "KernelSU-Next ${KSUN_REF} (tag ${KSU_VERSION_TAG}) calls"
+            echo "the following symbol(s), but SUSFS ${SUSFS_REPO}"
+            echo "(ref: ${SUSFS_REF}) does not define/declare them anywhere"
+            echo "in the kernel tree:"
+            echo
+            for sym in "${MISSING[@]}"; do
+              echo "  - ${sym}"
+            done
+            echo
+            echo "이 심볼들에 대해 include/linux/susfs.h / fs/susfs.c에"
+            echo "선언+스텁(또는 실제 구현)을 추가하거나, SUSFS_REF를"
+            echo "KernelSU-Next 커밋과 실제로 호환되는 고정 커밋으로"
+            echo "바꿔야 한다."
             echo "=================================================="
             exit 1
           fi
 
-          echo "KernelSU-Next / SUSFS ABI preflight: OK."
+          echo "KernelSU-Next / SUSFS ABI preflight: OK (${#CALLED_SYMS[@]} symbol(s) checked)."
 
       - name: NoMount 통합
         shell: bash
