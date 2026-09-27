@@ -149,7 +149,7 @@ jobs:
               ;;
           esac
 
-      - name: KernelSU-Next 통합
+      - name: KernelSU-Next 통합 및 파이썬 패처 완전 무력화
         shell: bash
         run: |
           set -euo pipefail
@@ -198,17 +198,36 @@ jobs:
           mkdir -p drivers/kernelsu/policy
           cp -r KernelSU-Next/uapi drivers/kernelsu/policy/uapi
 
-          # [핵심 1] drivers/kernelsu 내부의 모든 자동 파이썬 패처 무력화
+          # 1. KernelSU-Next 원본 폴더 제거 (Kbuild가 원본 파이썬 스크립트를 참조하지 못하도록 차단)
+          rm -rf KernelSU-Next
+
+          # 2. drivers/kernelsu 내부의 모든 .py 스크립트 무력화
           find drivers/kernelsu -type f -name "*.py" -exec bash -c 'echo "import sys; sys.exit(0)" > "$1"' _ {} \;
 
-          # [핵심 2] Kbuild 상단에 Manual Hook 및 버전 정보 변수 대입
-          cat << 'EOF' > drivers/kernelsu/Kbuild.tmp
-          CONFIG_KSU_MANUAL_HOOK := y
-          KSU_GIT_VERSION := d999a2aff11575c6e2f520129ecffb7c6058fb02
-          KSU_VERSION_TAG := v3.4.0-legacy-susfs-v2
-          EOF
-          cat drivers/kernelsu/Kbuild >> drivers/kernelsu/Kbuild.tmp
-          mv drivers/kernelsu/Kbuild.tmp drivers/kernelsu/Kbuild
+          # 3. drivers/kernelsu/Kbuild 정적화 및 파이썬 호출 구문 제거
+          python3 <<'PY'
+          from pathlib import Path
+
+          kbuild_path = Path("drivers/kernelsu/Kbuild")
+          if kbuild_path.exists():
+              lines = kbuild_path.read_text().splitlines()
+              sanitized = []
+              for line in lines:
+                  # 파이썬 스크립트 호출 또는 .py 참조 행 완전 주석 처리
+                  if ".py" in line or "python" in line.lower():
+                      sanitized.append(f"# SANITIZED: {line}")
+                  else:
+                      sanitized.append(line)
+
+              header = [
+                  "CONFIG_KSU_MANUAL_HOOK := y",
+                  "KSU_GIT_VERSION := d999a2aff11575c6e2f520129ecffb7c6058fb02",
+                  "KSU_VERSION_TAG := v3.4.0-legacy-susfs-v2",
+              ]
+
+              kbuild_path.write_text("\n".join(header + sanitized) + "\n")
+              print("[OK] drivers/kernelsu/Kbuild sanitized successfully.")
+          PY
 
           test -d drivers/kernelsu
           test -f drivers/kernelsu/Kbuild
@@ -781,7 +800,7 @@ jobs:
           rm -rf out
 
           # Clean up any nested .git directories that trigger setlocalversion length issues
-          find private/msm-google/drivers/kernelsu private/msm-google/SUSFS private/msm-google/NoMount private/msm-google/KernelSU-Next -name ".git" -exec rm -rf {} + 2>/dev/null || true
+          find private/msm-google/drivers/kernelsu private/msm-google/SUSFS private/msm-google/NoMount -name ".git" -exec rm -rf {} + 2>/dev/null || true
 
           export POST_DEFCONFIG_CMDS=""
           export SKIP_DEFCONFIG_CHECK=1
